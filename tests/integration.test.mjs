@@ -11,6 +11,8 @@ import { createPhysics } from '../js/physics.js';
 import { submitScore, fetchRanking } from '../js/api.js';
 
 const Matter = await import('matter-js').then((m) => m.default ?? m, () => null);
+// CI 처럼 의존성이 반드시 있어야 하는 환경에서는 물리 테스트를 조용히 건너뛰지 않고 실패시킨다.
+if (!Matter && process.env.CI) throw new Error('matter-js 가 설치되지 않음 (npm ci)');
 const skip = Matter ? false : 'matter-js 가 설치되지 않음 (npm install)';
 if (Matter) globalThis.Matter = Matter;
 
@@ -81,16 +83,23 @@ function playGame(seed) {
 function loadBackend() {
   const rows = [['timestamp', 'nickname', 'score', 'maxLevel', 'playTimeMs', 'drops', 'clientId']];
   const cache = new Map();
+  const props = new Map();
   const sheet = {
     getLastRow: () => rows.length,
-    getRange: (row, col, n, m) => ({
-      getValues: () => Array.from({ length: n }, (_, i) => Array.from({ length: m }, (_, j) => rows[row - 1 + i]?.[col - 1 + j] ?? '')),
-    }),
+    getRange: (row, col, n, m) =>
+      typeof row === 'string'
+        ? { setNumberFormat() {} } // 'B:B' 서식 지정
+        : { getValues: () => Array.from({ length: n }, (_, i) => Array.from({ length: m }, (_, j) => rows[row - 1 + i]?.[col - 1 + j] ?? '')) },
     appendRow: (values) => void rows.push(Array.from(values)),
   };
   const sandbox = {
     console,
-    PropertiesService: { getScriptProperties: () => ({ getProperty: () => 'sheet-id' }) },
+    PropertiesService: {
+      getScriptProperties: () => ({
+        getProperty: (k) => (k === 'SHEET_ID' ? 'sheet-id' : props.get(k) ?? null),
+        setProperty: (k, v) => void props.set(k, v),
+      }),
+    },
     SpreadsheetApp: { openById: () => ({ getSheetByName: () => sheet }) },
     LockService: { getScriptLock: () => ({ tryLock: () => true, releaseLock() {} }) },
     CacheService: {
@@ -138,8 +147,12 @@ test('완주한 판의 결과를 서버가 받아들이고 랭킹에 나타난�
     assert.equal(ranking.data[0].nickname, '통합테스트');
     assert.equal(ranking.data[0].score, run.payload.score);
 
-    // 같은 clientId 로 곧바로 다시 보내면 서버가 제한한다 (재시도 가능한 오류로 취급됨)
-    assert.deepEqual(await submitScore(run.payload, backend.opts), { ok: false, error: 'throttled' });
+    // 응답이 유실돼 같은 판을 다시 보내면 성공으로 답하고 행은 늘지 않는다 (재시도/부팅 때 재전송)
+    assert.deepEqual(await submitScore(run.payload, backend.opts), { ok: true });
+    assert.equal(backend.rows.length, 2, `seed ${seed}: 같은 판이 두 줄로 기록됨`);
+    // 다른 판을 같은 clientId 로 곧바로 보내면 서버가 제한한다 (재시도 가능한 오류로 취급됨)
+    const next = { ...run.payload, playTimeMs: run.payload.playTimeMs + 1 };
+    assert.deepEqual(await submitScore(next, backend.opts), { ok: false, error: 'throttled' });
   }
 });
 

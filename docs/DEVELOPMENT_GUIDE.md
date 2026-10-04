@@ -3,8 +3,9 @@
 > 같은 과일을 합쳐 더 큰 과일로 만들고, 상자 밖으로 넘치기 전에 **수박**을 완성하는 퍼즐 게임.
 > 기술 스택: **HTML5 Canvas + JavaScript(프런트엔드)** / **Google Apps Script + Google Sheets(랭킹 백엔드)**
 
-이 문서는 구현을 시작하기 전에 "무엇을, 어떤 순서로, 어떤 기준으로 만들지"를 정리한 가이드입니다.
+이 문서는 "무엇을, 어떤 순서로, 어떤 기준으로 만들지"를 정리한 가이드이며, 구현이 끝난 뒤 코드에 맞춰 갱신했습니다.
 수치(크기·점수·시간)는 모두 **초기값**이며 플레이테스트를 거치며 조정합니다.
+**수치와 백엔드 규칙의 단일 출처는 코드입니다**: 게임 수치는 `js/config.js`, 서버 규칙은 `gas/Code.gs`. 이 문서는 그 의도와 이유를 설명하며, 코드를 복사해 두지 않습니다(복사본은 금방 낡습니다).
 
 ---
 
@@ -53,7 +54,7 @@
 | 10 | 🍉 수박 | 116 | 66 | ❌ |
 
 - 점수 공식: `score(level) = (level + 1)(level + 2) / 2`
-- 떨어뜨릴 과일은 **Lv 0~4 중 무작위**, 다음 과일(Next)을 미리 보여준다.
+- 떨어뜨릴 과일은 **Lv 0~4 중 가중치 무작위**(`DROP_WEIGHTS = [30, 28, 20, 14, 8]`, 작은 과일이 더 자주 나온다), 다음 과일(Next)을 미리 보여준다.
 - 수박 2개가 닿으면 둘 다 사라지고 보너스 점수를 준다 (기본값 +100, [§13](#13-열린-결정사항) 참고).
 
 ---
@@ -99,28 +100,35 @@
 
 ```
 seongmo--fruit/
-├─ index.html              # 진입점: 캔버스, HUD, 모달 마크업
+├─ index.html              # 진입점: 캔버스, HUD, 모달 마크업 (DOM id/class 가 모듈 사이의 계약)
 ├─ css/
 │  └─ style.css
 ├─ js/
-│  ├─ config.js            # 상수: 과일 정의, 월드 크기, 점수 규칙, API_URL
-│  ├─ main.js              # 부트스트랩, 게임 루프, 상태 머신
+│  ├─ config.js            # 상수: 과일 정의, 월드 크기, 점수 규칙, 타이밍, API_URL, 저장 키
+│  ├─ main.js              # 부트스트랩, 게임 루프, 모듈 연결, ?debug 훅
 │  ├─ physics.js           # Matter.js 월드/벽/과일 생성, 충돌 → 합치기 큐
-│  ├─ game.js              # 점수, 다음 과일, 게임오버 판정 (렌더/DOM 비의존)
-│  ├─ render.js            # Canvas 그리기 (과일, 가이드라인, 이펙트)
+│  ├─ game.js              # 점수, 다음 과일, 상태 머신, 게임오버 판정 (렌더/DOM/Matter 비의존)
+│  ├─ render.js            # Canvas 그리기 (과일, 경계선, 이펙트)
 │  ├─ input.js             # 포인터/키보드 입력
-│  ├─ audio.js             # 효과음
-│  ├─ storage.js           # localStorage 래퍼 (try/catch 포함)
+│  ├─ audio.js             # 효과음 (Web Audio 합성, 파일 없음)
+│  ├─ storage.js           # localStorage 래퍼 (try/catch + 메모리 대체)
 │  └─ api.js               # GAS 통신 (랭킹 조회/점수 제출)
-├─ assets/
-│  ├─ fruits/              # 과일 스프라이트 (초기엔 비워두고 이모지 사용)
-│  └─ sounds/
 ├─ gas/
-│  ├─ Code.gs              # Apps Script 소스 (clasp로 동기화)
-│  └─ appsscript.json
-└─ docs/
-   └─ DEVELOPMENT_GUIDE.md
+│  ├─ Code.gs              # Apps Script 소스 (백엔드의 단일 출처, clasp로 동기화)
+│  └─ appsscript.json      # 매니페스트: V8, 시간대 Asia/Seoul, 웹 앱 USER_DEPLOYING / ANYONE_ANONYMOUS
+├─ tests/
+│  ├─ *.test.mjs           # 단위/통합 테스트 (node --test, 브라우저 불필요)
+│  └─ e2e/smoke.mjs        # 헤드리스 Chromium 로 실제 페이지를 구동하는 스모크 테스트
+├─ docs/
+│  └─ DEVELOPMENT_GUIDE.md
+├─ README.md               # 실행/테스트/랭킹 서버 설정/Pages 배포 요약 (이 가이드의 짧은 입구)
+├─ package.json            # 개발 의존성(matter-js, playwright-core)과 npm 스크립트. 배포물에는 쓰이지 않는다
+├─ package-lock.json
+├─ .nvmrc                  # 개발용 Node 버전
+└─ .gitignore
 ```
+
+> 과일 스프라이트/효과음 파일용 `assets/` 폴더는 아직 없습니다. 지금은 이모지와 Web Audio 합성을 쓰며, 스프라이트로 바꿀 때 `FRUITS[i].sprite`에 URL을 넣고 폴더를 만듭니다.
 
 **모듈 의존 원칙**
 
@@ -138,11 +146,11 @@ ES Module은 `file://`로 열면 동작하지 않으므로 로컬 서버가 필�
 
 ```bash
 # 프로젝트 루트에서
-python3 -m http.server 8000
+npm run serve                  # = python3 -m http.server 8000
 # → http://localhost:8000
 ```
 
-모바일 실기기 테스트는 같은 Wi-Fi에서 `http://<PC의 IP>:8000`으로 접속합니다.
+모바일 실기기 테스트는 같은 Wi-Fi에서 `http://<PC의 IP>:8000`으로 접속합니다. 설치할 것은 없지만(Python 3 만 필요), Matter.js 를 CDN 에서 불러오므로 인터넷 연결은 필요합니다.
 
 ### 의존 라이브러리
 
@@ -155,6 +163,22 @@ python3 -m http.server 8000
 ```
 
 > 물리 엔진을 직접 만들지 않는 이유: 원이 쌓이고 굴러서 안정되는 동작(접촉 해소, 슬립)을 직접 구현하면 비용이 크고 불안정합니다. Matter.js는 이 용도에 충분합니다.
+
+### 테스트 실행
+
+개발 의존성(`matter-js`, `playwright-core`)은 테스트에만 쓰이며 배포물에는 들어가지 않습니다. 필요한 Node 는 **20 이상**(`.nvmrc` 는 22)입니다.
+
+```bash
+npm ci                 # 의존성 설치 (Node 20+)
+npm test               # 단위/통합 테스트 (node --test). 브라우저 불필요
+npm run e2e:install    # e2e 용 Chromium 을 한 번 내려받는다 (playwright-core 는 브라우저를 포함하지 않는다)
+npm run test:e2e       # 실제 페이지를 헤드리스 Chromium 으로 구동하는 스모크 테스트
+```
+
+- 이미 설치된 Chromium 을 쓰려면 `CHROMIUM_PATH=/경로/chrome npm run test:e2e`, 일부 시나리오만 돌리려면 `npm run test:e2e -- --only=a,c`, 창을 보려면 `-- --headed`. 시나리오 id 는 `a b b2 c d e e2 f g h h2~h5 i1~i3 j k k2 l m n1~n4` 이고, 각 id 의 제목은 `tests/e2e/smoke.mjs` 에 있다.
+- e2e 는 **`js/config.js` 의 `API_URL` 과 무관하게** 동작합니다. 하네스가 모든 시나리오에서 이 값을 `''`(오프라인) 또는 가짜 URL 로 바꿔 서빙하므로, 운영 URL 을 넣은 뒤에도 외부로 요청이 나가지 않습니다.
+- Matter.js 는 CDN 대신 `node_modules` 의 같은 버전으로 대체되어 네트워크가 필요 없습니다.
+- 물리 테스트(`tests/physics.test.mjs`, `tests/integration.test.mjs`)는 `matter-js` 가 없으면 건너뜁니다. `CI` 환경변수가 설정돼 있으면 건너뛰지 않고 실패합니다.
 
 ### GAS 개발 (선택: clasp)
 
@@ -174,7 +198,8 @@ clasp push                              # 로컬 → Apps Script 반영
 ### 5.1 월드와 좌표
 
 - **논리 좌표계는 고정**(`400 × 600`)하고, 화면 크기에 맞춰 캔버스를 **스케일**한다. 물리는 항상 논리 좌표에서 계산하므로 기기마다 게임 난이도가 달라지지 않는다.
-- 상자는 바닥 + 좌/우 벽(정적 바디). 위쪽은 열려 있다.
+- 플레이 영역은 `x ∈ [0, 400]`, `y ∈ [0, 600]`. 상자는 바닥 + 좌/우 벽(정적 바디)이며 **벽은 이 영역 바깥**(`x < 0`, `x > 400`, `y > 600`)에 놓인다. 위쪽은 열려 있다. 따라서 과일 중심이 움직일 수 있는 범위는 `[r, 400 - r]` 이다.
+- 캔버스는 이 영역만 보여 주며 CSS 비율은 `2:3` 이다.
 - **경계선(DANGER_Y)** = 상자 위에서 약 `100px` 아래. 점선으로 표시한다.
 - 과일은 경계선 위쪽 **스폰 영역**(y ≈ 50)에서 대기하다가 떨어진다.
 
@@ -190,6 +215,7 @@ clasp push                              # 로컬 → Apps Script 반영
 
 | 상태 | 설명 |
 |---|---|
+| `IDLE` | 시작 화면. 아직 판이 시작되지 않음 |
 | `READY` | 현재 과일이 포인터 x를 따라다님. 입력 시 드롭 |
 | `COOLDOWN` | 드롭 직후 약 500ms. 입력 무시, 다음 과일 준비 |
 | `GAME_OVER` | 물리 정지, 결과 모달, 점수 제출/랭킹 표시 |
@@ -206,8 +232,10 @@ clasp push                              # 로컬 → Apps Script 반영
 
 단순히 "경계선을 넘었다"로 판정하면 **방금 떨어뜨린 과일** 때문에 즉시 패배한다. 두 가지 유예를 둔다.
 
-- **드롭 유예(`SETTLE_GRACE_MS` ≈ 1500ms)**: 드롭/생성 직후의 과일은 판정에서 제외.
-- **체류 시간(`OVERFLOW_MS` ≈ 2000ms)**: 경계선을 넘은 상태가 **연속으로** 이 시간 이상 유지되면 게임오버. 중간에 내려가면 타이머 리셋.
+- **드롭 유예(`TIMING.settleGrace` = 1500ms)**: 드롭/생성(합쳐져 태어난 것 포함) 직후의 과일은 판정에서 제외.
+- **체류 시간(`TIMING.overflow` = 2000ms)**: 과일의 윗면(`y - radius`)이 경계선(`WORLD.dangerY`)보다 위인 상태가 **연속으로** 이 시간 이상 유지되면 게임오버. 중간에 내려가면 타이머 리셋.
+
+**시간 기준**: 쿨다운, 드롭 유예, 경계선 체류, 플레이 시간은 모두 **시뮬레이션 시간**(물리 스텝 수 × `1000/60` ms)으로 잰다. 탭을 백그라운드로 보내거나 프레임이 멈춰도 규칙이 어긋나지 않고, 테스트가 결정적으로 시간을 진행할 수 있다. 실제 시계(`performance.now`)는 렌더러의 이펙트/깜빡임에만 쓴다.
 
 ### 5.5 밸런스 파라미터 (초기값)
 
@@ -226,313 +254,210 @@ clasp push                              # 로컬 → Apps Script 반영
 
 ## 6. 프런트엔드 구현 가이드
 
-### 6.1 과일 정의 (`config.js`)
+### 6.1 설정 (`config.js`)
+
+과일 정의(`FRUITS`: 이름·반지름·이모지·색, 선택적 `sprite`)와 아래 수치는 모두 `js/config.js` 한 곳에 있고, 밸런스는 이 파일의 숫자만 바꿔서 조정한다. 이 파일은 DOM/Matter 에 의존하지 않아 Node 에서도 import 된다.
 
 ```js
+// 플레이 영역은 x∈[0,width], y∈[0,height]. 벽(두께 wall)은 이 영역 '바깥'에 놓인다.
 export const WORLD = { width: 400, height: 600, wall: 20, dangerY: 100, spawnY: 50 };
 
-export const FRUITS = [
-  { level: 0,  name: '체리',     radius: 16,  emoji: '🍒', color: '#e53935' },
-  { level: 1,  name: '딸기',     radius: 22,  emoji: '🍓', color: '#ec407a' },
-  { level: 2,  name: '포도',     radius: 30,  emoji: '🍇', color: '#8e24aa' },
-  { level: 3,  name: '데코폰',   radius: 36,  emoji: '🍊', color: '#fb8c00' },
-  { level: 4,  name: '감',       radius: 44,  emoji: '🟠', color: '#ef6c00' },
-  { level: 5,  name: '사과',     radius: 54,  emoji: '🍎', color: '#d32f2f' },
-  { level: 6,  name: '배',       radius: 64,  emoji: '🍐', color: '#c0ca33' },
-  { level: 7,  name: '복숭아',   radius: 76,  emoji: '🍑', color: '#ffab91' },
-  { level: 8,  name: '파인애플', radius: 88,  emoji: '🍍', color: '#fdd835' },
-  { level: 9,  name: '멜론',     radius: 100, emoji: '🍈', color: '#9ccc65' },
-  { level: 10, name: '수박',     radius: 116, emoji: '🍉', color: '#43a047' },
-];
-
-export const LAST_LEVEL = FRUITS.length - 1;
-export const MAX_DROP_LEVEL = 4;            // 떨어뜨릴 수 있는 최대 단계
+export const LAST_LEVEL = FRUITS.length - 1;        // 10 (수박)
+export const MAX_DROP_LEVEL = 4;                    // 떨어뜨릴 수 있는 최대 단계
+export const DROP_WEIGHTS = [30, 28, 20, 14, 8];    // 단계별 출현 가중치 (길이 = MAX_DROP_LEVEL + 1)
 export const scoreOf = (level) => ((level + 1) * (level + 2)) / 2;
 export const WATERMELON_PAIR_BONUS = 100;
 
-export const TIMING = {
-  step: 1000 / 60,
-  dropCooldown: 500,
-  settleGrace: 1500,
-  overflow: 2000,
+export const TIMING = { step: 1000 / 60, dropCooldown: 500, settleGrace: 1500, overflow: 2000 };
+export const PHYSICS = { gravityY: 1, restitution: 0.1, friction: 0.1, frictionStatic: 0.5 };
+
+export const API_URL = '';           // Apps Script 웹 앱 URL(…/exec). 비어 있으면 오프라인 모드
+export const NICKNAME_MAX = 12;
+export const RANKING_LIMIT = 10;
+export const STORAGE_KEYS = {        // localStorage 키
+  best: 'fruit.best', nickname: 'fruit.nickname', muted: 'fruit.muted',
+  pending: 'fruit.pendingScore', clientId: 'fruit.clientId',
 };
 ```
 
-> **이모지 → 스프라이트 전환**: 이모지는 OS마다 모양이 다르고 크기 제어가 어렵습니다. 프로토타입은 이모지로 빠르게 만들고, 렌더러가 `FRUITS[i].sprite`가 있으면 이미지를, 없으면 이모지를 그리도록 만들어 두면 나중에 `config.js`만 수정해 교체할 수 있습니다.
+> **이모지 → 스프라이트 전환**: 이모지는 OS마다 모양이 다르고 크기 제어가 어렵습니다. 프로토타입은 이모지로 빠르게 만들고, 렌더러가 `FRUITS[i].sprite`가 있으면 이미지를, 없으면 이모지를 그리도록 만들어 두었으므로 나중에 `config.js`만 수정해 교체할 수 있습니다.
 
 ### 6.2 물리 월드 (`physics.js`)
 
+Matter.js(전역 `Matter`, CDN 스크립트)를 감싼 모듈이다. 인터페이스:
+
 ```js
-import { WORLD, FRUITS, LAST_LEVEL } from './config.js';
-
-const { Engine, Bodies, Body, Composite, Events } = Matter;
-const { width: W, height: H, wall } = WORLD;
-
-const engine = Engine.create({ gravity: { y: 1 } });
-const world = engine.world;
-const mergeQueue = [];
-
-// 벽: 바닥 + 좌/우 (정적 바디)
-Composite.add(world, [
-  Bodies.rectangle(W / 2, H + wall / 2, W + wall * 2, wall, { isStatic: true }),
-  Bodies.rectangle(-wall / 2, H / 2, wall, H * 2, { isStatic: true }),
-  Bodies.rectangle(W + wall / 2, H / 2, wall, H * 2, { isStatic: true }),
-]);
-
-export function spawnFruit(level, x, y, velocity) {
-  const body = Bodies.circle(x, y, FRUITS[level].radius, {
-    restitution: 0.1, friction: 0.1, frictionStatic: 0.5,
-  });
-  body.isFruit = true;
-  body.level = level;
-  body.merging = false;
-  body.bornAt = performance.now();
-  if (velocity) Body.setVelocity(body, velocity);
-  Composite.add(world, body);
-  return body;
-}
-
-// 충돌은 '표시'만 하고, 실제 변경은 스텝 뒤에 한다
-function onCollide(e) {
-  for (const { bodyA: a, bodyB: b } of e.pairs) {
-    if (!a.isFruit || !b.isFruit) continue;
-    if (a.level !== b.level || a.merging || b.merging) continue;
-    a.merging = b.merging = true;
-    mergeQueue.push([a, b]);
-  }
-}
-Events.on(engine, 'collisionStart', onCollide);
-Events.on(engine, 'collisionActive', onCollide); // 겹친 채로 생성된 경우 대비
-
-export function flushMerges(onMerged) {
-  for (const [a, b] of mergeQueue) {
-    const x = (a.position.x + b.position.x) / 2;
-    const y = (a.position.y + b.position.y) / 2;
-    const level = a.level;
-    const velocity = {
-      x: (a.velocity.x + b.velocity.x) / 2,
-      y: (a.velocity.y + b.velocity.y) / 2,
-    };
-    Composite.remove(world, [a, b]);
-    if (level === LAST_LEVEL) {
-      onMerged({ level, x, y, bonus: true });
-    } else {
-      spawnFruit(level + 1, x, y, velocity);
-      onMerged({ level: level + 1, x, y, bonus: false });
-    }
-  }
-  mergeQueue.length = 0;
-}
+const physics = createPhysics({ onMerge });     // onMerge({ level, x, y, bonus }) — 합치기 1번당 1회
+physics.step(dtMs, simTime);   // Engine.update → 속도 제한 → 벽 이탈 보정 → 합치기 큐 처리
+physics.spawn(level, x, y, simTime, { merged, velocity });   // 과일 바디 생성 (bornAt/mergedAt 기록)
+physics.bodies();              // 살아 있는 과일 바디들
+physics.clear();               // 모든 과일과 대기 중인 합치기 제거 (재시작)
 ```
+
+- 벽은 플레이 영역 **바깥**에 두꺼운 정적 바디(바닥/좌/우, 두께 `max(WORLD.wall, 100)`)로 세우고 위쪽은 열어 둔다(천장 없음). 얇으면 빠른 과일이 터널링으로 뚫고, 튕겨 오른 과일이 넘어가지 못하도록 좌/우 벽은 위로 아주 높게(`y = -2000` 까지) 세운다.
+- 큰 과일이 작은 과일 위에 쌓일 때의 떨림을 줄이려고 Matter 의 반복 횟수를 기본값보다 올렸고(위치 10 / 속도 8), 원은 32각형으로 근사한다.
+- 과일 바디에는 `isFruit`, `level`, `merging`, `bornAt`, `mergedAt`, `overSince` 가 붙는다. 시간 값은 모두 시뮬레이션 시간이다.
+- `onMerge` 의 `level` 은 **새로 생긴** 과일의 단계다. 수박끼리의 합치기는 `level = LAST_LEVEL`, `bonus = true` 이며 둘 다 제거하고 새 과일은 만들지 않는다.
 
 **주의할 점**
 
-- `collisionActive`도 구독하지 않으면, 합쳐진 과일이 이웃과 겹쳐서 태어났을 때 합치기가 누락될 수 있다.
+- 충돌 콜백(`collisionStart`/`collisionActive`) 안에서는 월드를 건드리지 않고 `merging = true` 표시와 큐 적재만 한다. 실제 제거/생성은 `step()` 안에서 `Engine.update` 뒤에 일괄 처리한다.
+- `collisionActive`도 구독한다. 합쳐진 과일이 이웃과 겹쳐서 태어났을 때 `collisionStart` 가 다시 오지 않기 때문이다.
 - 새로 생긴 큰 과일이 이웃을 밀어내며 연쇄 합치기가 일어나는 것은 **정상 동작**이다(콤보). 막지 않는다.
-- 드롭 전 대기 중인 과일은 물리 바디가 아니라 **렌더링용 객체**로만 둔다. 드롭하는 순간 `spawnFruit`으로 바디를 만든다.
+- 드롭 전 대기 중인 과일은 물리 바디가 아니라 **렌더링용 객체**로만 둔다. 드롭하는 순간 `spawn` 으로 바디를 만든다.
+- 합쳐진 새 과일은 두 과일의 **중간 지점**에서 **속도의 평균**을 이어받는다(`velocity` 옵션).
+- 안전망 두 가지: 속도 상한(`MAX_SPEED = 40`)으로 터널링을 막고, 벽/바닥에 중심이 반지름의 절반보다 깊이 파고든 과일은 끌어낸다. 큰 과일이 합쳐져 태어날 때 이웃한 작은 과일이 벽 쪽으로 눌리는 일이 실제로 있어 둔 장치다.
+- `onMerge` 콜백이 예외를 던져도 나머지 합치기는 끝까지 처리하고(그렇지 않으면 `merging = true` 로 고착), 첫 예외를 마지막에 다시 던진다.
 
 ### 6.3 게임 루프 (`main.js`)
 
 렌더링과 물리를 분리하고, 물리는 **고정 타임스텝**으로 돌려 주사율(60/120/144Hz)과 무관하게 결과가 같도록 한다.
 
 ```js
-let last = performance.now();
-let acc = 0;
-
-function frame(now) {
-  acc += Math.min(now - last, 100);   // 탭 전환 후 복귀 시 폭주 방지
-  last = now;
-
-  while (acc >= TIMING.step) {
-    Engine.update(engine, TIMING.step);
-    flushMerges(handleMerged);        // 점수, 이펙트, 효과음
-    acc -= TIMING.step;
-  }
-
-  if (state === 'READY' || state === 'COOLDOWN') checkGameOver(now);
-  render(now);
-  requestAnimationFrame(frame);
+function frame(app, now) {
+  requestAnimationFrame((t) => frame(app, t));
+  const dt = app.last === null ? 0 : clamp(now - app.last, 0, 100);   // 탭 전환 후 복귀 시 폭주 방지
+  app.last = now;
+  if (!app.paused) advanceSimulation(app, dt);    // acc += dt; while (acc >= step) stepOnce(app). paused 는 ?debug 훅용
+  app.input.update(dt);                           // 방향키를 누르고 있는 동안 조준 이동
+  app.renderer.draw(buildFrame(app, now));
 }
-requestAnimationFrame(frame);
-```
 
-### 6.4 게임오버 판정 (`game.js`)
-
-```js
-export function checkGameOver(fruits, now) {
-  for (const f of fruits) {
-    if (now - f.bornAt < TIMING.settleGrace) { f.overSince = null; continue; }
-    const top = f.position.y - FRUITS[f.level].radius;
-    if (top < WORLD.dangerY) {
-      f.overSince ??= now;
-      if (now - f.overSince >= TIMING.overflow) return true;
-    } else {
-      f.overSince = null;
-    }
-  }
-  return false;
+function stepOnce(app) {
+  app.steps += 1;
+  app.simTime = app.steps * TIMING.step;          // 부동소수점 누적 오차 없이 스텝 수로 계산
+  app.physics.step(TIMING.step, app.simTime);     // 합치기 → onMerge → 점수/이펙트/효과음
+  app.game.update(app.simTime);                   // 쿨다운 종료
+  if (checkOverflow(app)) handleGameOver(app);
 }
 ```
 
-경계선을 넘기 직전(체류 시간의 50% 이상)에는 경계선을 **붉게 깜빡여** 플레이어에게 경고한다.
+### 6.4 게임 규칙과 게임오버 판정 (`game.js`)
+
+`game.js` 는 DOM/Matter 를 모르는 순수 로직이라 Node 에서 단위 테스트한다. 점수, 최고 단계, 드롭 수, 수박 완성 여부(`cleared`, 첫 수박에서 한 번), 현재/다음 과일(가중치 추첨, `rng` 주입 가능), 상태 머신(`IDLE` → `READY` ⇄ `COOLDOWN` → `GAME_OVER`), 플레이 시간을 가진다.
+
+게임오버 판정은 `evaluateOverflow(items, simTime)` 가 한다. 각 항목은 `{ y, radius, bornAt, overSince }`:
+
+- `simTime - bornAt < TIMING.settleGrace` 인 과일은 판정에서 제외하고 `overSince` 를 비운다.
+- 과일의 윗면(`y - radius`)이 `dangerY` 보다 위면 `overSince` 를 기록하고(없을 때만), `(simTime - overSince) / TIMING.overflow` 를 위험도로 본다. 내려가면 `overSince` 를 비워 타이머를 리셋한다.
+- 가장 높은 위험도가 `danger ∈ [0, 1]`, 1 에 닿으면 게임오버. `danger` 는 렌더러가 경고 표시에 쓴다.
+
+경계선을 넘기 직전(체류 시간의 50% 이상, `danger >= 0.5`)에는 경계선을 **붉게 깜빡여** 플레이어에게 경고한다. 사용자가 OS 의 **모션 줄이기**를 켰다면 깜빡이지 않고 같은 붉은 강조를 고정해서 보여 준다([§6.6](#66-렌더링-renderjs)).
 
 ### 6.5 입력 (`input.js`)
 
 - **Pointer Events**(`pointerdown/move/up`) 하나로 마우스와 터치를 함께 처리한다.
-- 캔버스에 CSS `touch-action: none;` — 안 쓰면 모바일에서 스크롤/확대가 끼어든다.
-- 포인터 x는 **캔버스 좌표 → 논리 좌표**로 변환한 뒤, 현재 과일이 벽을 뚫지 않도록 `[wall + r, W - wall - r]`로 clamp한다.
-- 모바일은 `pointermove`로 위치를 잡고 **`pointerup`에서 드롭**하는 방식이 손가락에 과일이 가려지는 문제를 줄여준다.
-- 데스크톱 보조: `← →` 이동, `Space` 드롭.
+- 캔버스에 CSS `touch-action: none;` — 안 쓰면 모바일에서 스크롤/확대가 끼어든다. (`<meta viewport>` 에 `user-scalable=no` 를 넣어 확대를 막지는 않는다. 저시력 사용자의 확대를 막으면 접근성(WCAG 1.4.4) 위반이다.)
+- 포인터 x는 **캔버스 좌표 → 논리 좌표**로 변환한 뒤, 현재 과일이 벽을 뚫지 않도록 `[r, W - r]`로 clamp한다. 벽이 플레이 영역 바깥에 있으므로 `wall` 은 빼지 않는다.
+- 모바일은 `pointermove`로 위치를 잡고 **`pointerup`에서 드롭**하는 방식이 손가락에 과일이 가려지는 문제를 줄여준다. 마우스/펜은 누르지 않고 움직이기만 해도 조준하고(클릭하면 드롭), 터치는 누르고 있는 동안만 조준한다. 누르는 사이에 오버레이가 뜨면 드롭하지 않는다.
+- 데스크톱 보조: `← →` 이동, `Space` 드롭. 키를 **누르고 있어서 생기는 자동 반복(`repeat`)은 무시**한다. 닉네임 입력칸이나 버튼에 포커스가 있을 때는 키를 가로채지 않는다.
 
 ### 6.6 렌더링 (`render.js`)
 
 - `devicePixelRatio`를 반영해 캔버스 내부 해상도를 키우고, CSS 크기로 줄여 보여준다 (레티나에서 흐려지지 않게).
-- 그리는 순서: 배경 → 상자/경계선 → 과일 → 대기 중인 과일 + 낙하 가이드선 → 이펙트 → HUD.
-- 합치기 이펙트: 새 과일을 `scale 0.8 → 1.1 → 1.0`으로 150ms 튀게(렌더 전용 스케일, 물리 반지름은 즉시 확정) + 파티클 몇 개.
-- Next 과일, 현재 점수, 최고 점수는 DOM(HUD) 또는 캔버스 중 편한 쪽에 표시한다. DOM이면 접근성/반응형이 쉽다.
+- 그리는 순서: 배경 → 상자/경계선 → 과일 → 대기 중인 과일 + 낙하 가이드선 → 이펙트. (HUD 는 DOM)
+- 합치기 이펙트: 새 과일을 `scale 0.8 → 1.12 → 1.0`으로 **180ms** 튀게(렌더 전용 스케일, 물리 반지름은 즉시 확정) + 파티클/링/점수 글자.
+- **모션 줄이기(`prefers-reduced-motion: reduce`)**: CSS 애니메이션/전환은 `style.css` 에서, 캔버스는 렌더러가 `matchMedia` 로 직접 반영한다(실행 중 설정을 바꿔도 따라간다). 경계선 경고는 점멸 없이 고정, 과일 튀기/파티클/링/드롭 이펙트는 생략, 점수 글자는 제자리에서 잠깐 보인다. 과일의 물리 움직임은 게임 자체라서 그대로다.
+- Next 과일, 현재 점수, 최고 점수는 DOM(HUD)에 표시한다. DOM 이라 접근성/반응형이 쉽다.
+- 렌더러는 규칙/물리를 모르고 `main.js` 가 넘겨 주는 `frame`(`bodies`, `held`, `danger`, `state`, …)만 그린다. 모듈 로드 시점에 DOM 에 접근하지 않아 Node 에서 import 하고 가짜 2D 컨텍스트로 테스트할 수 있다.
 
-### 6.7 반응형/모바일
+### 6.7 반응형/모바일/접근성
 
 - 레이아웃은 **세로 모바일 우선**. 게임 영역 비율 `2:3`을 유지하며 화면에 맞춰 축소.
+- **낮은 가로 화면**(가로로 눕힌 폰, 200~300% 확대한 데스크톱: `@media (orientation: landscape) and (max-height: 500px)`)에서는 게임판을 왼쪽에 높이만큼 크게 두고 HUD/진화 줄을 오른쪽에 세운다. 이 모드에서 시작/결과/랭킹 패널은 게임판 안이 아니라 **화면 전체 기준**으로 펼쳐진다. 패널이 스크롤돼도 '게임 시작'/'다시 하기'/'닫기' 버튼은 아래에 고정되어 보인다.
+- 닉네임 입력 줄은 뷰포트 폭이 아니라 **패널의 실제 폭**으로 줄바꿈한다(입력칸 최소 `9em`).
 - `<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">`
 - iOS Safari는 사용자 제스처 전까지 오디오가 막힌다 → **첫 터치에서 AudioContext를 resume**.
-- 더블탭 확대, 길게 눌러 선택/컨텍스트 메뉴가 뜨지 않게 `user-select: none` 등을 적용.
+- 더블탭 확대, 길게 눌러 선택/컨텍스트 메뉴가 뜨지 않게 `user-select: none`, `touch-action` 등을 적용.
+- 색 대비는 WCAG AA(일반 글자 4.5:1)를 기준으로 한다. 기본 버튼은 흰 글자 대비 4.9~5.6:1, 보조 글자색은 카드/HUD 위에서 4.5:1 이상이다(`tests/static.test.mjs` 가 CSS 에서 읽어 검증한다).
+- 토글 버튼(음소거)은 이름(`aria-label="음소거"`)을 고정하고 상태는 `aria-pressed` 로만 알린다. 이름이 상태에 따라 바뀌면 "소리 켜기, 눌림" 같은 모순된 낭독이 된다.
 
 ### 6.8 저장 (`storage.js`)
 
-최고 점수와 닉네임, 음소거 설정은 `localStorage`에 저장한다. 사생활 보호 모드 등에서 접근이 **예외를 던질 수 있으므로** 모든 읽기/쓰기를 `try/catch`로 감싸고, 실패해도 게임은 정상 동작해야 한다.
+최고 점수와 닉네임, 음소거 설정, 전송 실패한 점수(`pending`), 익명 `clientId` 는 `localStorage`에 저장한다. 사생활 보호 모드 등에서 접근이 **예외를 던질 수 있으므로** 모든 읽기/쓰기를 `try/catch`로 감싸고(메모리 대체값 포함), 실패해도 게임은 정상 동작해야 한다. `clientId` 는 `/^[A-Za-z0-9_-]{16,64}$/` 형식의 무작위 값으로 한 번 만들어 저장한다.
+
+### 6.9 디버그 훅 (`?debug`)
+
+주소에 **`debug` 파라미터**(`?debug`, `?debug=1`)가 있을 때만 `window.__fruit` 가 생긴다. 이름에 `debug` 가 들어 있을 뿐인 쿼리(`?nodebug=1`)에는 생기지 않는다. e2e 가 시뮬레이션을 결정적으로 제어하는 데 쓴다.
+
+| 멤버 | 설명 |
+|---|---|
+| `game`, `physics` | 실행 중인 객체 |
+| `spawn(level, x, y)` / `bodies()` | 과일 생성 / 현재 과일 요약 |
+| `pause()` / `resume()` | 실시간 루프 정지/재개 |
+| `advance(ms)` | 정지 중에도 `ms` 만큼 시뮬레이션을 결정적으로 진행 |
+| `forceGameOver()` | 판을 즉시 끝낸다 (시작 전이면 먼저 시작) |
+| `getState()` / `getScore()` | 상태 / 점수 |
+
+`?debug` 가 없으면 훅은 만들어지지 않는다(일반 접속에는 노출되지 않지만, 누구든 주소에 `?debug` 를 붙이면 쓸 수 있다). 점수는 어차피 클라이언트를 신뢰할 수 없으므로 이 훅이 보안 경계를 바꾸지는 않는다([§12](#12-보안과-주의사항)).
 
 ---
 
 ## 7. Google Apps Script 백엔드
 
+백엔드의 **단일 출처는 [`gas/Code.gs`](../gas/Code.gs)** 입니다. 이 문서에 코드를 복사해 두지 않습니다. 배포할 때는 반드시 그 파일을 붙여 넣거나 `clasp push` 로 올리세요. (예전 가이드에 있던 인라인 코드는 구현과 달라 — 빈도 제한, 닉네임 정제, 점수 상한, 7열 스키마가 없는 — 그대로 배포하면 더 약한 서버가 됩니다.)
+
 ### 7.1 시트 구성
 
-스프레드시트를 새로 만들고 시트 이름을 `scores`로 한 뒤 1행에 헤더를 둔다.
+스프레드시트를 새로 만들고 시트 이름을 `scores`로 한 뒤 1행에 헤더를 둡니다. **`setup()` 이 이 모든 것을 만들어 주므로 직접 입력할 필요가 없습니다**([§7.4](#74-배포-절차)).
 
-| A | B | C | D | E | F |
-|---|---|---|---|---|---|
-| `timestamp` | `nickname` | `score` | `maxLevel` | `playTimeMs` | `drops` |
+| A | B | C | D | E | F | G |
+|---|---|---|---|---|---|---|
+| `timestamp` | `nickname` | `score` | `maxLevel` | `playTimeMs` | `drops` | `clientId` |
 
-스프레드시트 ID(URL의 `/d/<ID>/edit`)는 **프로젝트 설정 → 스크립트 속성**에 `SHEET_ID`로 저장한다.
+- `clientId` 는 브라우저가 한 번 만들어 저장하는 익명 ID 이며 제출 빈도 제한과 재전송 판별에 쓰입니다.
+- **B열(닉네임)은 일반 텍스트 서식**이어야 합니다. 자동 서식이면 시트가 `3-4`, `1/2`, `12:30` 을 날짜/시간으로, `TRUE` 를 불리언으로, `007` 을 숫자 7 로 바꿔 닉네임이 달라집니다. `setup()` 과 첫 제출이 이 서식을 지정합니다(이미 바뀌어 저장된 행은 시트에 보이는 문자열로 대신 보여 주며, 원래 글자는 복구할 수 없습니다).
+- 스프레드시트 ID는 **스크립트 속성**의 `SHEET_ID` 에 저장됩니다(`setup()` 이 기록). `NICKNAME_TEXT_FORMAT` 속성은 "이 시트의 닉네임 열 서식을 이미 지정했다"는 표시라서 제출마다 되풀이하지 않게 해 줍니다.
 
 ### 7.2 API 명세
 
 | 메서드 | 요청 | 응답 |
 |---|---|---|
 | `GET` | `?action=ranking&limit=10` | `{ ok: true, data: [{ nickname, score, maxLevel, at }] }` |
-| `POST` | 본문(JSON 문자열): `{ nickname, score, maxLevel, playTimeMs, drops }` | `{ ok: true }` 또는 `{ ok: false, error: "<코드>" }` |
+| `POST` | 본문(JSON 문자열, `text/plain`): `{ nickname, score, maxLevel, playTimeMs, drops, clientId }` | `{ ok: true }` 또는 `{ ok: false, error: "<코드>" }` |
 
-에러 코드: `bad_request`, `invalid_nickname`, `invalid_score`, `implausible`, `server_busy`
+에러 코드: `bad_request`, `invalid_nickname`, `invalid_score`, `implausible`, `throttled`, `server_busy`
+(서버 내부 오류는 상세를 숨기고 `server_busy` 로 답하며, 원인은 Apps Script 실행 로그에만 남습니다.)
 
-### 7.3 `Code.gs`
+### 7.3 서버 규칙 요약 (`gas/Code.gs`)
 
-```js
-const SHEET_NAME = 'scores';
-const MAX_NICKNAME = 12;
-const MAX_SCORE = 100000;
-const MAX_SCORE_PER_DROP = 300;   // 초기값. 플레이테스트 로그를 보고 조정
-const MIN_MS_PER_DROP = 400;      // 드롭 쿨다운(500ms)보다 약간 느슨하게
-const RANKING_CACHE_KEY = 'ranking';
-const RANKING_CACHE_SEC = 60;
-const RANKING_KEEP = 50;
+수치는 코드의 상수가 기준입니다. 근거와 함께 요약합니다.
 
-function doGet(e) {
-  const p = (e && e.parameter) || {};
-  if ((p.action || 'ranking') === 'ranking') {
-    const limit = Math.min(Math.max(Number(p.limit) || 10, 1), RANKING_KEEP);
-    return json_({ ok: true, data: getRanking_().slice(0, limit) });
-  }
-  return json_({ ok: false, error: 'bad_request' });
-}
+| 규칙 | 내용 |
+|---|---|
+| 점수 상한 | `score <= drops × MAX_SCORE_PER_DROP`(**120**). 드롭당 이론 최댓값 약 111.3점에 약 8% 여유를 둔 값이다(아래 근거). 전체 상한 `MAX_SCORE = 100000` |
+| 최소 시간 | `playTimeMs >= (drops - 1) × MIN_MS_PER_DROP`(**400ms**). 첫 드롭은 대기 없이 가능하고 쿨다운은 500ms 라 `drops - 1` 번의 간격만 필요하다. 400 은 프레임 지터 여유(20%)를 둔 값이다 |
+| 범위 | `maxLevel 0~10`, `drops 1~5000`, `playTimeMs 1~24h`, 정수만 허용(숫자 또는 숫자 문자열), 본문 2000자 이하 |
+| `clientId` | 선택. 있으면 `/^[A-Za-z0-9_-]{16,64}$/` 이어야 하고 아니면 `bad_request`. **없으면 빈도 제한과 재전송 판별을 건너뛴다**(브라우저는 항상 보낸다) |
+| 닉네임 | 1~12자(코드포인트 기준). 제어문자·제로폭·RTL 덮어쓰기·**한글 채움 문자(U+115F/1160/3164/FFA0)·점자 빈칸(U+2800)·아랍 문자 표시(U+061C)** 등 눈에 안 보이는 문자를 지운다. 이모지의 변형 선택자/태그 문자는 지키되, 보이는 글자가 하나도 없으면 `invalid_nickname`. `= + - @` 로 시작하면 `'` 를 붙여 수식 인젝션을 막는다 |
+| 제출 빈도 | 같은 `clientId` 는 **10초**에 한 번(`throttled`). 확인과 기록을 같은 락 안에서 해 동시 요청도 막는다 |
+| **재전송(멱등)** | 같은 `clientId` 가 **같은 판**(점수·최고 단계·플레이 시간·드롭 수가 모두 같음)을 다시 보내면 `{ ok: true }` 로 답하고 행을 늘리지 않는다. 응답이 유실돼(타임아웃/네트워크 끊김) 클라이언트가 재시도해도 같은 기록이 두 줄 쌓이지 않고, "저장됐는데 너무 자주 등록한다" 는 거짓 오류도 나오지 않는다. 최근 500행을 시트에서 직접 보므로 캐시가 만료된 뒤(다음 접속 때 자동 재전송)에도 동작한다. 이때 닉네임을 고쳐 보내도 처음 저장된 닉네임이 남는다 |
+| 락 | `LockService` 로 쓰기를 직렬화, 5초 안에 못 잡으면 `server_busy` |
+| 랭킹 조회 | 점수 내림차순(같으면 먼저 기록한 쪽이 위), 최대 50행 캐시 60초. 손으로 고쳤거나 깨진 행, 보이는 닉네임이 없는 행은 건너뛴다. 제출 시 캐시를 비운다 |
 
-function doPost(e) {
-  try {
-    const body = JSON.parse(e.postData.contents);
-    return json_(submitScore_(body));
-  } catch (err) {
-    return json_({ ok: false, error: 'bad_request' });
-  }
-}
+#### 타당성 임계값의 근거
 
-function submitScore_(b) {
-  const nickname = sanitizeNickname_(b.nickname);
-  const score = Number(b.score);
-  const maxLevel = Number(b.maxLevel);
-  const playTimeMs = Number(b.playTimeMs);
-  const drops = Number(b.drops);
+검사는 두 부등식이다. 정상 플레이를 거부하지 않는 것이 먼저고, 그 안에서 가능한 한 조인다.
 
-  if (!nickname) return { ok: false, error: 'invalid_nickname' };
-  if (!Number.isInteger(score) || score < 0 || score > MAX_SCORE) {
-    return { ok: false, error: 'invalid_score' };
-  }
-  if (!isPlausible_(score, drops, playTimeMs)) {
-    return { ok: false, error: 'implausible' };
-  }
+- **점수 상한(드롭당 120)**: 과일 Lv L 의 질량을 `2^L`(체리 = 1)로 두면 합치기는 질량을 보존한다. 드롭은 Lv4 이하라 한 번에 최대 `2^4 = 16` 의 질량이 들어온다. Lv L 과일을 *만드는* 합치기는 질량 `2^L` 을 소모하므로 질량 `M` 으로 최대 `M / 2^L` 번 일어나고, 한 번에 `(L+1)(L+2)/2` 점이다. 수박 두 개(질량 2048)가 사라질 때는 보너스 100 이다. 따라서 질량 1단위당 점수의 상한은
 
-  const lock = LockService.getScriptLock();
-  if (!lock.tryLock(5000)) return { ok: false, error: 'server_busy' };
-  try {
-    sheet_().appendRow([new Date(), nickname, score, maxLevel, playTimeMs, drops]);
-    CacheService.getScriptCache().remove(RANKING_CACHE_KEY);
-  } finally {
-    lock.releaseLock();
-  }
-  return { ok: true };
-}
+  `Σ(L=1..10) (L+1)(L+2)/2 / 2^L + 100/2048 ≈ 6.910 + 0.049 = 6.959`
 
-function getRanking_() {
-  const cache = CacheService.getScriptCache();
-  const hit = cache.get(RANKING_CACHE_KEY);
-  if (hit) return JSON.parse(hit);
+  이고, 드롭당 `16 × 6.959 ≈ 111.3` 점이다. 여기에 약 8% 여유를 둔 값이 120 이다. 실제 최댓값은 이보다 훨씬 작다. Lv4 로만 채우면(Lv4 는 그 아래 단계의 합치기를 겪지 않으므로) 약 **28.3점/드롭**이다. 상한이 헐거운 것은 점수 규칙이 조금 바뀌어도 정상 기록을 거부하지 않기 위해서다. `tests/gas.test.mjs` 가 `config.js` 의 규칙으로 이 계산을 다시 해서, 상한이 이론값보다 작거나(정상 기록 거부) 10% 넘게 크면(검사가 느슨) 실패한다.
+- **최소 시간(드롭 간격 400ms)**: 게임은 **시뮬레이션 시간** 기준 500ms 쿨다운을 강제하고 첫 드롭은 대기 없이 가능하다. 그래서 `n` 번 드롭한 판의 `playTimeMs` 는 항상 `(n - 1) × 500` 이상이다. 서버는 여기에 20% 여유를 둔 `(n - 1) × 400` 을 요구한다. 시간이 시뮬레이션 시간이라 탭을 백그라운드로 보내거나 프레임이 멈춰도 값이 줄어들지 않는다([§5.4](#54-게임오버-판정)).
 
-  const rows = sheet_().getDataRange().getValues().slice(1)   // 헤더 제외
-    .map(r => ({ nickname: r[1], score: r[2], maxLevel: r[3], at: new Date(r[0]).getTime() }))
-    .sort((a, b) => b.score - a.score)
-    .slice(0, RANKING_KEEP);
-
-  cache.put(RANKING_CACHE_KEY, JSON.stringify(rows), RANKING_CACHE_SEC);
-  return rows;
-}
-
-// ── 유틸 ─────────────────────────────────────────────
-
-function sheet_() {
-  const id = PropertiesService.getScriptProperties().getProperty('SHEET_ID');
-  return SpreadsheetApp.openById(id).getSheetByName(SHEET_NAME);
-}
-
-function json_(obj) {
-  return ContentService.createTextOutput(JSON.stringify(obj))
-    .setMimeType(ContentService.MimeType.JSON);
-}
-
-function sanitizeNickname_(raw) {
-  let s = String(raw == null ? '' : raw)
-    .replace(/[\u0000-\u001f\u007f]/g, '')   // 제어문자 제거
-    .trim()
-    .slice(0, MAX_NICKNAME);
-  if (!s) return '';
-  if (/^[=+\-@]/.test(s)) s = "'" + s;       // 시트 수식 인젝션 방지
-  return s;
-}
-
-function isPlausible_(score, drops, playTimeMs) {
-  if (!Number.isFinite(drops) || !Number.isFinite(playTimeMs)) return false;
-  if (drops < 1 || playTimeMs < drops * MIN_MS_PER_DROP) return false;
-  return score <= drops * MAX_SCORE_PER_DROP;
-}
-```
+임계값을 바꿀 때는 `gas/Code.gs` 의 상수와 그 위의 주석, 이 절을 함께 고친다.
 
 ### 7.4 배포 절차
 
-1. 스프레드시트 생성 → `scores` 시트 + 헤더 입력.
-2. **확장 프로그램 → Apps Script** 에서 `Code.gs` 붙여넣기, 스크립트 속성에 `SHEET_ID` 등록.
-3. **배포 → 새 배포 → 유형: 웹 앱**
+1. 스프레드시트를 만든다(시트/헤더는 만들지 않아도 된다).
+2. **확장 프로그램 → Apps Script** 를 열고 `gas/Code.gs` 의 내용을 붙여 넣는다(또는 `clasp push`). `appsscript.json` 은 V8, 시간대 `Asia/Seoul`, 웹 앱 `USER_DEPLOYING` / `ANYONE_ANONYMOUS` 를 선언한다.
+3. 편집기에서 **`setup()` 을 한 번 실행**한다. 권한을 승인하면 `SHEET_ID` 속성 저장, `scores` 시트와 7열 헤더 생성, 첫 행 고정, 닉네임 열 텍스트 서식 지정을 한다. 여러 번 실행해도 기존 데이터를 건드리지 않고, 예전 6열 헤더는 7열로 고친다. (`setup()` 은 스프레드시트에서 연 Apps Script 에서만 실행된다.)
+4. **배포 → 새 배포 → 유형: 웹 앱**
    - 실행 사용자: **나**
-   - 액세스 권한: **모든 사용자** (프런트가 로그인 없이 호출해야 함)
-4. 최초 1회 권한 승인 후 발급되는 `…/exec` URL을 `js/config.js`의 `API_URL`에 넣는다.
-5. 동작 확인:
+   - 액세스 권한: **모든 사용자** (프런트가 로그인 없이 호출해야 함). "Google 계정이 있는 모든 사용자" 를 고르면 브라우저가 로그인 HTML 을 받아 `bad_response` 가 된다.
+5. 최초 1회 권한 승인 후 발급되는 `…/exec` URL을 `js/config.js`의 `API_URL`에 넣는다. (`/dev` 로 끝나는 테스트 URL 이 아니다.)
+6. 동작 확인:
 
 ```bash
 curl -L "https://script.google.com/macros/s/<DEPLOY_ID>/exec?action=ranking&limit=5"
@@ -540,6 +465,7 @@ curl -L "https://script.google.com/macros/s/<DEPLOY_ID>/exec?action=ranking&limi
 
 > ⚠️ **코드를 수정했을 때** "새 배포"를 만들면 URL이 바뀝니다. **배포 관리 → 편집(연필) → 버전: 새 버전 → 배포**로 같은 URL을 유지하세요.
 > ⚠️ 웹 앱은 **저장된 코드가 아니라 "배포된 버전"** 을 실행합니다. 수정 후 재배포를 잊으면 반영되지 않습니다.
+> ⚠️ `setup()` 을 건너뛰고 `SHEET_ID` 를 손으로 넣어도 동작은 하지만, 닉네임 열 서식은 첫 제출 때 자동으로 지정됩니다. 그 전에 자동 서식으로 쌓인 행은 원래 글자를 잃을 수 있습니다.
 
 ---
 
@@ -555,40 +481,25 @@ Apps Script 웹 앱은 **CORS preflight(OPTIONS)를 처리하지 못합니다.**
 
 ### 8.2 `api.js`
 
+`js/api.js` 는 **어떤 경우에도 throw/reject 하지 않고** `{ ok, ... }` 로 돌려준다. 호출하는 쪽은 `try/catch` 없이 `ok` 만 보면 된다.
+
 ```js
-import { API_URL } from './config.js';
-
-const TIMEOUT_MS = 8000;
-
-async function request(url, options) {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
-  try {
-    const res = await fetch(url, { ...options, signal: ctrl.signal });
-    return await res.json();
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-export function fetchRanking(limit = 10) {
-  return request(`${API_URL}?action=ranking&limit=${limit}`);
-}
-
-export function submitScore({ nickname, score, maxLevel, playTimeMs, drops }) {
-  return request(API_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'text/plain;charset=utf-8' },  // preflight 회피
-    body: JSON.stringify({ nickname, score, maxLevel, playTimeMs, drops }),
-  });
-}
+isApiConfigured()                                // API_URL 이 비어 있지 않은가
+fetchRanking(limit = 10, opts?)  // -> { ok: true, data: [{ nickname, score, maxLevel, at }] } | { ok: false, error }
+submitScore({ nickname, score, maxLevel, playTimeMs, drops, clientId }, opts?)  // -> { ok: true } | { ok: false, error }
 ```
+
+- 에러 코드: 클라이언트가 만드는 `not_configured`(URL 없음), `timeout`(8초), `network`, `bad_response`(JSON 이 아니거나 모양이 다름: 로그인 HTML 페이지 등)와, 서버 코드 `bad_request`, `invalid_nickname`, `invalid_score`, `implausible`, `throttled`, `server_busy`.
+- POST 는 `Content-Type: text/plain;charset=utf-8` 하나만 보낸다(위 §8.1). 타임아웃은 `AbortController` 와 `Promise.race` 를 함께 써서, `fetch` 구현이 `signal` 을 무시해도 멈추지 않는다.
+- 서버 응답의 행은 검증/정규화한다: 형식이 깨진 행과 보이는 닉네임이 없는 행은 버리고, 숫자는 정수로, `maxLevel` 은 유효 범위로 맞춘다.
+- `opts = { url, fetchImpl, timeoutMs }` 로 URL/`fetch`/타임아웃을 바꿀 수 있어, 테스트가 `config.js` 를 건드리지 않고 Node 에서 돌릴 수 있다.
 
 ### 8.3 UX 원칙
 
-- GAS는 **콜드 스타트로 1~3초** 걸릴 수 있다. 게임 진행을 막지 말고, 결과 화면에서 "랭킹 불러오는 중…" 상태를 보여준다.
-- 제출 실패(네트워크/`server_busy`) 시 **재시도 버튼**을 제공하고, 점수는 `localStorage`에 임시 보관한다.
-- `API_URL`이 비어 있거나 호출이 실패해도 **오프라인 모드(최고 점수만)** 로 정상 플레이되어야 한다.
+- GAS는 **콜드 스타트로 1~3초** 걸릴 수 있다. 게임 진행을 막지 말고, 결과 화면에서 "랭킹 불러오는 중…" 상태를 보여준다. 응답이 오기 전에 화면을 닫거나 다음 판을 시작했다면 **늦게 도착한 이전 응답은 버린다**(새 화면을 건드리지 않는다).
+- 제출 실패(`timeout`/`network`/`bad_response`/`server_busy`/`throttled`) 시 **재시도 버튼**("다시 시도")을 제공하고, 점수는 `localStorage`(`fruit.pendingScore`)에 임시 보관한다. 보관분은 **한 건**(가장 최근에 실패한 판)이다. 다음 접속 때 한 번 **조용히** 다시 보내고(화면에는 아무것도 띄우지 않는다), 성공하거나 서버가 영구적으로 거절한 오류(`invalid_nickname` 등)면 지운다. 다시 재시도 가능한 오류로 실패하면 보관분을 지켜 다음 접속에 또 시도한다. 영구 오류로 거절된 점수는 보관하지 않는다.
+- **재시도는 안전하다.** 타임아웃으로 취소해도 서버는 첫 요청을 이미 처리했을 수 있다. 서버가 같은 판의 재전송을 성공으로 처리하므로([§7.3](#73-서버-규칙-요약-gascodegs)) 수동 재시도와 부팅 때 자동 재전송이 중복 행을 만들지 않는다.
+- **오프라인 모드**: `API_URL`이 비어 있으면(`isApiConfigured()` 가 거짓) 결과 화면의 닉네임 폼을 숨기고, 시작 화면의 "랭킹 보기"와 결과 화면의 랭킹 자리에는 "랭킹 서버가 연결되지 않았어요…" 안내를 보여 준다. 네트워크 호출은 하지 않고 최고 점수만 `localStorage` 에 저장되며, 부팅 때 재전송도 건너뛴다. `API_URL` 이 있어도 랭킹 조회가 실패하면 "랭킹을 불러오지 못했어요" 만 보이고 게임은 계속된다.
 - 닉네임/랭킹 데이터를 DOM에 넣을 때는 **`textContent`** 를 사용한다 (`innerHTML` 금지 → XSS 방지).
 - 점수 제출은 **게임오버 때 1회**. 제출 버튼을 누른 뒤에는 비활성화해 중복 제출을 막는다.
 
@@ -597,53 +508,85 @@ export function submitScore({ nickname, score, maxLevel, playTimeMs, drops }) {
 ## 9. 개발 로드맵(마일스톤)
 
 각 마일스톤은 독립적으로 동작을 확인할 수 있는 단위이며, **하나 끝날 때마다 커밋**합니다.
+아래 상태는 **코드와 자동 테스트로 확인한 범위**만 "완료"로 적었습니다. 실기기·실서버·공개 URL 에서의 확인은 사용자 작업이라 "부분"으로 남겨 두었습니다.
 
-| # | 마일스톤 | 작업 | 완료 기준 (DoD) |
-|---|---|---|---|
-| M0 | 프로젝트 세팅 | 폴더 구조, `index.html`, Matter.js 로드, 로컬 서버 | 빈 캔버스가 뜨고 콘솔 에러 없음 |
-| M1 | 물리 프로토타입 | 상자, 클릭 위치에 과일 드롭, 렌더링 | 과일이 떨어져 쌓이고 벽을 뚫지 않음 |
-| M2 | 합치기 | 충돌 → 합치기 큐 → 다음 단계 생성, 11단계 정의 | 같은 과일이 합쳐지고 수박까지 도달 가능, 중복 합치기 없음 |
-| M3 | 게임 규칙 | 점수, Next 미리보기, 쿨다운, 경계선, 게임오버, 재시작 | 한 판이 시작→종료→재시작까지 완결됨 |
-| M4 | UI/UX | HUD, 모바일 터치, 반응형 스케일, 결과 모달, 최고점 저장 | 스마트폰 세로 화면에서 불편 없이 플레이 |
-| M5 | GAS 랭킹 | 시트 + `Code.gs` 배포, `api.js`, 닉네임 입력, 랭킹 표시 | 점수 제출 후 랭킹에 반영, 서버 장애에도 게임 정상 |
-| M6 | 폴리싱 | 효과음/BGM 토글, 합치기 이펙트, 스프라이트 교체, 수박 완성 연출 | 체감 품질 개선, 성능 저하 없음 |
-| M7 | 배포 | GitHub Pages, README, 최종 QA | 공개 URL에서 end-to-end 동작 |
+| # | 마일스톤 | 작업 | 완료 기준 (DoD) | 상태 |
+|---|---|---|---|---|
+| M0 | 프로젝트 세팅 | 폴더 구조, `index.html`, Matter.js 로드, 로컬 서버 | 빈 캔버스가 뜨고 콘솔 에러 없음 | **완료** |
+| M1 | 물리 프로토타입 | 상자, 클릭 위치에 과일 드롭, 렌더링 | 과일이 떨어져 쌓이고 벽을 뚫지 않음 | **완료** |
+| M2 | 합치기 | 충돌 → 합치기 큐 → 다음 단계 생성, 11단계 정의 | 같은 과일이 합쳐지고 수박까지 도달 가능, 중복 합치기 없음 | **완료** |
+| M3 | 게임 규칙 | 점수, Next 미리보기, 쿨다운, 경계선, 게임오버, 재시작 | 한 판이 시작→종료→재시작까지 완결됨 | **완료** |
+| M4 | UI/UX | HUD, 모바일 터치, 반응형 스케일, 결과 모달, 최고점 저장 | 스마트폰 세로 화면에서 불편 없이 플레이 | **완료** (실기기 확인 남음) |
+| M5 | GAS 랭킹 | 시트 + `Code.gs` 배포, `api.js`, 닉네임 입력, 랭킹 표시 | 점수 제출 후 랭킹에 반영, 서버 장애에도 게임 정상 | **부분** (코드 완료, 배포 안 함) |
+| M6 | 폴리싱 | 효과음/BGM 토글, 합치기 이펙트, 스프라이트 교체, 수박 완성 연출 | 체감 품질 개선, 성능 저하 없음 | **부분** (스프라이트, BGM 없음) |
+| M7 | 배포 | GitHub Pages, README(`README.md` 에 실행/테스트/배포 요약), 최종 QA | 공개 URL에서 end-to-end 동작 | **부분** (README 만 완료) |
 
 > 우선순위: **M1~M3(재미의 핵심)을 먼저 완성**하고 실제로 해본 뒤 M4 이후로 넘어갑니다. 합치기의 손맛과 밸런스가 안 나오면 이후 작업은 의미가 없습니다.
+
+**완료한 것**: M0~M3 은 물리/규칙 단위 테스트(`tests/physics.test.mjs`, `tests/game.test.mjs`)와 e2e 시나리오가 DoD 를 직접 확인한다. M4 는 세로(390×844, 320×568)·가로·300% 확대 뷰포트를 에뮬레이션한 e2e 가 레이아웃과 터치 드롭, 결과 화면, 최고점 저장을 확인한다.
+
+**남은 일** — 아래는 모두 사용자 작업이거나 선택 사항이다.
+
+| 마일스톤 | 남은 일 | 왜 남았나 |
+|---|---|---|
+| M5 | 스프레드시트 + Apps Script 를 직접 배포하고 `/exec` URL 을 `js/config.js` 의 `API_URL` 에 입력([§7.4](#74-배포-절차)) | 구글 계정이 필요하다. 지금 `API_URL` 은 `''` 이라 **실제 서버와의 통신은 한 번도 확인되지 않았다**(`Code.gs` 는 모의 Apps Script 로만 검증) |
+| M7 | 코드를 배포 브랜치(`main`)에 병합하고, GitHub Pages 켜기(Settings → Pages, `main` / root), 공개 URL 에서 한 판 + 랭킹 등록 확인([§11](#11-배포)) | 저장소 설정과 계정 권한이 필요하다. Pages 가 켜져 있는지 작성 환경에서 확인할 수 없어 완료로 치지 않았다 |
+| M4, M7 | iOS Safari / Android Chrome 실기기에서 한 판 완주(터치, 오디오, 회전) | e2e 는 헤드리스 Chromium 의 에뮬레이션이다 |
+| M6 | 실제 과일 스프라이트 | 지금은 이모지다(감은 🟠 임시). 이미지를 만들어 `assets/fruits/` 에 두고 `FRUITS[i].sprite` 에 URL 을 넣으면 렌더러가 이미지를 그린다. 코드는 준비돼 있고 이미지가 없다 |
+| M6 | BGM | 구현하지 않았다. 음소거 버튼은 효과음(Web Audio 합성)을 끈다. 필요 없다면 DoD 에서 BGM 을 뺀다 |
+| M6 | 성능 확인 | "성능 저하 없음"은 따로 측정하지 않았다. 저사양 폰에서 프레임을 확인한다 |
 
 ---
 
 ## 10. 테스트 체크리스트
 
-자동화 테스트보다 **수동 플레이 점검**이 중심입니다. 다만 `game.js`의 순수 로직(점수 계산, 게임오버 판정)은 가볍게 단위 테스트할 수 있습니다.
+실제 손맛과 기기별 동작은 **수동 플레이 점검**이 필요하지만, 규칙과 연동은 자동 테스트가 지켜 줍니다([§4 테스트 실행](#테스트-실행)).
+
+| 종류 | 파일 | 보는 것 |
+|---|---|---|
+| 단위 | `tests/game.test.mjs` | 점수, 가중치 추첨, 상태 머신, 경계선 체류/유예 |
+| 단위 | `tests/physics.test.mjs` | 실제 Matter 로 합치기(쌍/3개/수박), 속도 이어받기, 속도 상한, 벽 이탈 방지 |
+| 단위 | `tests/render.test.mjs` | `popScale`/`shade`, 경계선 경고(50% 임계, 3Hz), 모션 줄이기 |
+| 단위 | `tests/audio.test.mjs`, `tests/storage.test.mjs` | Web Audio 합성/무음 처리, localStorage 안전 래퍼 |
+| 단위 | `tests/api.test.mjs`, `tests/gas.test.mjs` | 클라이언트 요청/응답 정규화, `Code.gs` 를 vm 에서 **모의 Apps Script**(시트/락/캐시/속성을 흉내 낸 객체)로 실행: 검증/거부 코드, 닉네임 정제, 빈도 제한, 재전송, `setup()`, 매니페스트, 타당성 상한 재계산 |
+| 통합 | `tests/integration.test.mjs` | 실제 Matter 로 한 판을 끝까지 돌려 `api.js` → `Code.gs`(모의) 로 흘려 보냄. 같은 시드의 결정성도 확인 |
+| 정적 | `tests/static.test.mjs` | 뷰포트 메타, 접근성 이름, 색 대비, 레이아웃 계약, `package.json` 계약 |
+| e2e | `tests/e2e/smoke.mjs` | 헤드리스 Chromium 로 실제 페이지(가짜 API 서버 사용): 입력, 합치기, 게임오버, 랭킹/제출/재전송, 반응형(세로/가로/300% 확대 에뮬레이션), 키보드, 음소거, 모션 줄이기 |
+
+백엔드 항목은 자동 테스트가 `Code.gs` 를 **모의 서비스 위에서** 확인한 것이다. 실제 스프레드시트/배포에서의 확인은 직접 해야 한다. 아래 체크리스트에서 `(자동)` 표시는 위 테스트가 이미 확인하는 항목이고, 나머지는 기기/서버에서 직접 확인한다.
 
 **물리/합치기**
-- [ ] 같은 과일 2개가 닿으면 정확히 1개의 상위 과일이 생긴다 (중복 생성 없음)
-- [ ] 3개가 한꺼번에 닿아도 2개만 합쳐지고 나머지 1개는 남는다
-- [ ] 합쳐진 과일이 이웃과 겹쳐도 연쇄 합치기가 정상 동작한다
-- [ ] 수박 2개 → 소멸 + 보너스 점수
-- [ ] 과일이 벽/바닥을 뚫고 나가지 않는다 (빠르게 떨어뜨려도)
-- [ ] 60Hz / 120Hz 모니터에서 물리 속도가 동일하다
+- [ ] (자동) 같은 과일 2개가 닿으면 정확히 1개의 상위 과일이 생긴다 (중복 생성 없음)
+- [ ] (자동) 3개가 한꺼번에 닿아도 2개만 합쳐지고 나머지 1개는 남는다
+- [ ] (자동) 합쳐진 과일이 이웃과 겹쳐도 연쇄 합치기가 정상 동작한다
+- [ ] (자동) 수박 2개 → 소멸 + 보너스 점수
+- [ ] (자동) 과일이 벽/바닥을 뚫고 나가지 않는다 (빠르게 떨어뜨려도)
+- [ ] 60Hz / 120Hz 모니터에서 물리 속도가 동일하다 (고정 타임스텝이라 결정적이며 `integration` 이 같은 시드의 같은 결과를 확인하지만, 실제 모니터에서는 직접 본다)
 
 **게임 규칙**
-- [ ] 드롭 직후 과일이 경계선 위에 있어도 게임오버가 되지 않는다
-- [ ] 경계선을 넘은 채 2초 유지되면 게임오버, 도중에 내려가면 취소된다
-- [ ] 쿨다운 중 입력이 무시된다
-- [ ] 재시작 시 이전 판의 바디/타이머/점수가 남아 있지 않다
-- [ ] 탭을 백그라운드로 보냈다 돌아와도 물리가 폭주하지 않는다
+- [ ] (자동) 드롭 직후 과일이 경계선 위에 있어도 게임오버가 되지 않는다
+- [ ] (자동) 경계선을 넘은 채 2초 유지되면 게임오버, 도중에 내려가면 취소된다
+- [ ] (자동) 쿨다운 중 입력이 무시된다
+- [ ] (자동) 재시작 시 이전 판의 바디/타이머/점수가 남아 있지 않다
+- [ ] 탭을 백그라운드로 보냈다 돌아와도 물리가 폭주하지 않는다 (e2e 는 메인 스레드 정체로 흉내 낸다. 실제 탭 전환은 직접)
 
 **UI/기기**
-- [ ] iOS Safari / Android Chrome / 데스크톱 Chrome에서 입력이 동작한다
-- [ ] 화면 회전·창 크기 변경 시 캔버스가 올바르게 스케일된다
+- [ ] iOS Safari / Android Chrome / 데스크톱 Chrome에서 입력이 동작한다 (e2e 는 Chromium 에뮬레이션뿐)
+- [ ] 화면 회전·창 크기 변경 시 캔버스가 올바르게 스케일된다 (가로 모드에서도 게임판이 크고, 시작 버튼/닉네임 입력/등록 버튼이 보인다)
+- [ ] (자동, 뷰포트 에뮬레이션) 브라우저 확대(200~300%)를 해도 HUD/진화 줄이 잘리지 않는다
+- [ ] (자동) OS 의 모션 줄이기를 켜면 경계선 경고가 깜빡이지 않고 파티클/튀기 효과가 없다
 - [ ] 스크롤/확대/길게 누르기 메뉴가 게임 조작을 방해하지 않는다
-- [ ] 오디오가 첫 터치 이후 재생된다
+- [ ] 오디오가 첫 터치 이후 재생된다 (e2e 는 컨텍스트 연결만 확인한다. 실제 소리와 iOS 는 직접)
 
-**백엔드**
-- [ ] 정상 제출 → 시트에 한 행이 추가되고 랭킹에 반영된다
-- [ ] 빈 닉네임, 긴 닉네임, `=1+1` 같은 닉네임 처리
-- [ ] 음수/비정수/과도한 점수, 드롭 수와 맞지 않는 점수 → 거부
-- [ ] 동시에 여러 번 제출해도 행이 유실/중복되지 않는다
-- [ ] `API_URL` 미설정, 네트워크 차단 상태에서도 게임이 플레이된다
+**백엔드** (실제 배포 후 확인)
+- [ ] 정상 제출 → 시트에 한 행이 추가되고 랭킹에 반영된다 (모의 서비스로는 자동)
+- [ ] (자동, 모의) 빈 닉네임, 긴 닉네임, `=1+1` 같은 닉네임 처리
+- [ ] (자동, 모의) 음수/비정수/과도한 점수, 드롭 수와 맞지 않는 점수 → 거부
+- [ ] 동시에 여러 번 제출해도 행이 유실/중복되지 않는다 (진짜 `LockService` 는 직접)
+- [ ] (자동, 모의) 응답이 유실된 뒤 같은 판을 다시 보내도(수동 재시도, 다음 접속 때 자동 재전송) 행이 하나만 있다
+- [ ] `3-4`, `1/2`, `007` 같은 닉네임이 그대로 저장되고 랭킹에 보인다 (서식 지정 호출은 자동으로 확인하지만, 실제 시트의 동작은 직접)
+- [ ] (자동, 모의) 한글 채움 문자(U+3164 등)나 점자 빈칸(U+2800)만으로 된 닉네임은 거부된다
+- [ ] (자동) `API_URL` 미설정, 네트워크 차단 상태에서도 게임이 플레이된다
 
 ---
 
@@ -654,7 +597,9 @@ export function submitScore({ nickname, score, maxLevel, playTimeMs, drops }) {
 1. 저장소 **Settings → Pages**
 2. Source: `Deploy from a branch`, Branch: `main` / `(root)`
 3. `https://<계정>.github.io/<저장소>/` 로 접속 확인
-4. 상대 경로(`./js/main.js`, `./assets/...`)만 사용해 서브 경로에서도 동작하게 한다.
+4. 상대 경로(`./js/main.js` 등. 스프라이트를 추가하면 `./assets/...`)만 사용해 서브 경로에서도 동작하게 한다.
+
+빌드 단계가 없어 저장소가 그대로 배포물이다(`tests/` 와 `docs/` 는 올라가도 쓰이지 않고, `node_modules/` 는 `.gitignore` 라 올라가지 않는다). 배포할 브랜치(위에서는 `main`)에 이 코드가 병합되어 있어야 한다. **Pages 를 켜는 것은 저장소 소유자의 작업**이라 완료로 기록하지 않았다([§9](#9-개발-로드맵마일스톤)).
 
 ### 백엔드 → Apps Script 웹 앱
 
@@ -663,6 +608,7 @@ export function submitScore({ nickname, score, maxLevel, playTimeMs, drops }) {
 ### 릴리스 전 최종 점검
 
 - [ ] 콘솔에 에러/경고 없음
+- [ ] `npm test` 와 `npm run test:e2e` 통과 (둘 다 `API_URL` 값과 무관하게 동작한다)
 - [ ] `API_URL`이 운영 배포 URL
 - [ ] 시트에 테스트 데이터 정리
 - [ ] 모바일 실기기에서 한 판 완주
@@ -675,15 +621,16 @@ export function submitScore({ nickname, score, maxLevel, playTimeMs, drops }) {
 
 | 단계 | 대책 | 비고 |
 |---|---|---|
-| 기본 (M5) | 서버에서 형식/범위 검증, 닉네임 정제, 점수 상한, `playTimeMs`·`drops` 대비 점수 타당성 검사 | §7.3에 포함 |
+| 기본 (M5) | 서버에서 형식/범위 검증, 닉네임 정제, 점수 상한, `playTimeMs`·`drops` 대비 점수 타당성 검사 | §7.3 / `gas/Code.gs` |
 | 보강 | 판 시작 시 서버가 **세션 토큰** 발급 → 제출 시 토큰 + 경과 시간 검증, 토큰 1회용 | 랭킹이 공개되어 어뷰징이 보일 때 |
-| 보강 | `CacheService`로 `clientId`/IP 대용 키 기준 **제출 빈도 제한** | |
+| 기본 (구현됨) | `CacheService`로 `clientId` 기준 **제출 빈도 제한**(10초) + 같은 판의 재전송은 성공으로 처리해 중복 행 방지 | §7.3. `clientId` 는 브라우저가 만드는 값이라 우회할 수 있다 |
 | 운영 | 시트에서 이상 행을 수동 삭제 → 캐시 만료(최대 60초) 후 반영 | |
 
 **기타 주의**
 
 - 스프레드시트는 **공유하지 않는다** (스크립트가 "나" 권한으로 접근하므로 공개할 필요 없음). 랭킹은 GAS API로만 노출한다.
-- 시트에 쓰는 문자열은 수식 인젝션(`= + - @` 시작)을 막는다 → §7.3 `sanitizeNickname_`.
+- 시트에 쓰는 문자열은 수식 인젝션(`= + - @` 시작)을 막는다 → `gas/Code.gs` 의 `sanitizeNickname_`.
+- `?debug` 훅은 같은 브라우저 안의 테스트 도구일 뿐 새로운 권한을 주지 않는다. 점수 검증은 서버가 하며, 클라이언트 점수 위조는 위 표의 한계 안에서만 막는다.
 - 화면에 출력할 때는 `textContent` 사용 (XSS).
 - GAS는 호출 횟수·동시 실행에 **쿼터**가 있다. 랭킹은 캐시(60초)를 쓰고, 프런트는 결과 화면에서만 호출한다.
 - `API_URL`(배포 ID)은 공개되어도 되는 값이지만, **스프레드시트 ID나 다른 비밀 값은 프런트 코드에 넣지 않는다.**
@@ -704,6 +651,7 @@ export function submitScore({ nickname, score, maxLevel, playTimeMs, drops }) {
 | 6 | 랭킹 대상 | 닉네임 입력(로그인 없음) | 구글 로그인 연동 |
 | 7 | 언어 | 한국어 UI | 다국어 |
 | 8 | 감 아이콘 | 🟠 (이모지에 감이 없음) | 스프라이트 제작 시 교체 |
+| 9 | 닉네임의 ZWJ/ZWNJ(U+200D/200C) | 제거한다. 그래서 `👩‍💻` 같은 합성 이모지는 `👩💻` 로 갈라지고, 제로폭 문자만으로 된 이름은 거부된다 | 글자 사이의 ZWJ/ZWNJ 는 보존하고 맨 앞/뒤/단독일 때만 제거(합성 이모지 유지, 구현이 더 복잡) |
 
 ---
 

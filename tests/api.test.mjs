@@ -178,6 +178,13 @@ test('fetchRanking: 형식이 깨진 행은 버리고 숫자는 정수로 맞춘
   );
 });
 
+test('fetchRanking: 보이는 글자가 없는 닉네임(한글 채움 문자, 점자 빈칸 등)의 행은 버린다', async () => {
+  const blank = ['\u115f', '\u1160', '\u115f\u1160', '\u2800', '\u061c', '\u034f', '\u180e', '\u17b4\u17b5', '\ufe0f', ' \ufe0e\ufe0f ', '\u{e0041}'];
+  const data = [...blank.map((nickname) => row({ nickname })), row({ nickname: '수\u115f박\u2800' }), row({ nickname: '\u2764\ufe0f' }), row({ nickname: '^^' })];
+  const res = await fetchRanking(50, opts(replyWith({ ok: true, data }).fetchImpl));
+  assert.deepEqual(res.data.map((r) => r.nickname), ['수박', '\u2764\ufe0f', '^^']);
+});
+
 test('fetchRanking: 닉네임의 제어문자/보이지 않는 문자는 지우되 HTML 은 그대로 둔다 (표시는 textContent)', async () => {
   const data = [row({ nickname: '  a\u0000b\u0007\u202ec  ' }), row({ nickname: '<img src=x onerror=alert(1)>' })];
   const res = await fetchRanking(10, opts(replyWith({ ok: true, data }).fetchImpl));

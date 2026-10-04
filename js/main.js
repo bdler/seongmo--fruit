@@ -120,8 +120,8 @@ function createHud(dom) {
     },
     hideBanner,
     setMuted(muted) {
+      // 토글 버튼은 이름을 고정하고 상태는 aria-pressed 로만 알린다 ("음소거, 눌림" = 소리 꺼짐)
       dom.btnMute.setAttribute('aria-pressed', String(muted));
-      dom.btnMute.setAttribute('aria-label', muted ? '소리 켜기' : '소리 끄기');
       dom.btnMute.textContent = muted ? '🔇' : '🔊';
     },
   };
@@ -626,7 +626,7 @@ function bootstrap() {
   dom.btnStart.addEventListener('click', () => startGame(app));
   dom.btnRestart.addEventListener('click', () => startGame(app));
   document.addEventListener('visibilitychange', () => void (app.last = null));
-  if (location.search.includes('debug')) installDebugHook(app);
+  if (new URLSearchParams(location.search).has('debug')) installDebugHook(app);
 
   resubmitPending().catch(() => {});
   if (prefersFinePointer()) focusSoft(dom.btnStart);

@@ -15,8 +15,9 @@ const SERVER_ERRORS = new Set([
   'server_busy',
 ]);
 
-// 제어문자와 눈에 안 보이는 서식 문자 (서버의 NICKNAME_STRIP_RE 와 같은 범위)
-const INVISIBLE_RE = /[\u0000-\u001f\u007f-\u009f\u00ad\u200b-\u200f\u2028-\u202e\u2060-\u2069\u3164\uffa0\ufeff]/g;
+// 제어문자와 눈에 안 보이는 서식 문자 (서버의 NICKNAME_STRIP_RE / NICKNAME_NO_VISIBLE_RE 와 같은 범위)
+const INVISIBLE_RE = /[\u0000-\u001f\u007f-\u009f\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180e\u200b-\u200f\u2028-\u202e\u2060-\u2069\u2800\u3164\uffa0\ufeff]/g;
+const NO_VISIBLE_RE = /^[\s\ufe00-\ufe0f\u{e0000}-\u{e0fff}]*$/u;
 
 function resolveUrl(opts) {
   const url = opts && opts.url !== undefined ? opts.url : API_URL;
@@ -98,6 +99,7 @@ function normalizeRow(row) {
   if (!row || typeof row !== 'object') return null;
   if (typeof row.nickname !== 'string') return null;
   const nickname = row.nickname.replace(INVISIBLE_RE, '').trim();
+  if (NO_VISIBLE_RE.test(nickname)) return null; // 예전에 저장된 '보이지 않는 닉네임' 행이 빈 이름으로 나오지 않게
   const score = toNumber(row.score);
   const maxLevel = toNumber(row.maxLevel);
   const at = toNumber(row.at);

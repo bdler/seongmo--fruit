@@ -24,9 +24,18 @@ function createSheet(rows) {
     getRange(row, col, numRows, numCols) {
       // A1 표기('B:B')는 서식 지정에만 쓴다
       if (typeof row === 'string') {
-        return { setNumberFormat: (f) => void sheet.numberFormats.push([row, f]) };
+        return {
+          setNumberFormat(f) {
+            if (sheet.formatError) throw sheet.formatError;
+            sheet.numberFormats.push([row, f]);
+          },
+        };
       }
       return {
+        // 화면에 보이는 문자열. 날짜/불리언 셀은 sheet.displayOf(값) 로 흉내 낸다 (기본은 String(값)).
+        getDisplayValues() {
+          return this.getValues().map((line) => line.map((v) => (sheet.displayOf ? sheet.displayOf(v) : String(v))));
+        },
         getValues() {
           sheet.reads++;
           const out = [];
@@ -287,7 +296,6 @@ test('랭킹: 비었거나 깨진 행은 건너뛴다', () => {
     ['not a date', 'junkTime', 50, 1],
     [new Date(NaN), 'invalidDate', 50, 1],
     [new Date(12), { x: 1 }, 50, 1], // 닉네임이 객체
-    [new Date(13), true, 50, 1], // 닉네임이 불리언
     [new Date(14), '\u200b\u202e', 50, 1], // 보이지 않는 문자뿐
   ];
   const env = createEnv({ rows: [HEADER, ...garbage, row(100, 'ok', 40), row(200, 'ok2', 30)] });
@@ -362,7 +370,7 @@ test('제출: 새 기록이 즉시 랭킹에 반영된다 (캐시 무효화)', (
   assert.deepEqual(post(env, valid({ nickname: 'new', score: 900 })), { ok: true });
   assert.equal(env.cache.has('ranking'), false);
   assert.deepEqual(get(env, {}).data.map((r) => r.nickname), ['new', 'old']);
-  assert.equal(env.sheet.reads, 2);
+  assert.equal(env.sheet.reads, 3, '랭킹 읽기 2번 + 제출 때 재전송 확인(최근 행 읽기) 1번');
 });
 
 test('제출: 제출한 점수가 getRanking 정렬에서 같은 점수의 기존 기록 뒤에 온다', () => {
@@ -507,6 +515,90 @@ test('닉네임: 수식 인젝션 시작 문자(= + - @, 탭/CR)를 무력화한
   assert.equal(env.gas.sanitizeNickname_("'안녕"), "'안녕");
 });
 
+test('닉네임: 보이지 않는 문자뿐이면 거부한다 (한글 채움 문자, 점자 빈칸, 아랍 문자 표시 등)', () => {
+  const env = createEnv();
+  const invisible = [
+    ['한글 초성 채움 U+115F', '\u115f'],
+    ['한글 중성 채움 U+1160', '\u1160'],
+    ['초성+중성 채움', '\u115f\u1160'],
+    ['한글 채움 U+3164', '\u3164'],
+    ['반각 한글 채움 U+FFA0', '\uffa0'],
+    ['점자 빈칸 U+2800', '\u2800'.repeat(12)],
+    ['아랍 문자 표시 U+061C', '\u061c'],
+    ['결합 문자 연결 U+034F', '\u034f'],
+    ['몽골 모음 구분자 U+180E', '\u180e'],
+    ['크메르 U+17B4/17B5', '\u17b4\u17b5'],
+    ['변형 선택자만 U+FE0F', '\ufe0f'],
+    ['변형 선택자 여러 개와 공백', ' \ufe0e\ufe0f \ufe00'],
+    ['태그 문자만 U+E0041', '\u{e0041}'],
+    ['여러 종류가 섞인 보이지 않는 문자', '\u115f\u2800\u061c\ufe0f\u{e0041}\u200b'],
+  ];
+  for (const [name, raw] of invisible) {
+    assert.equal(env.gas.sanitizeNickname_(raw), '', name);
+    assert.deepEqual(post(env, valid({ nickname: raw, clientId: undefined })), { ok: false, error: 'invalid_nickname' }, name);
+  }
+  assert.equal(env.sheet.rows.length, 1, '아무 행도 추가되지 않는다');
+});
+
+test('닉네임: 보이는 글자가 있으면 보이지 않는 문자만 지우고, 이모지의 변형 선택자/태그는 지킨다', () => {
+  const env = createEnv();
+  const clean = (s) => env.gas.sanitizeNickname_(s);
+  assert.equal(clean('수\u115f박\u2800왕\u061c'), '수박왕');
+  assert.equal(clean('\u3164수박\u1160'), '수박');
+  assert.equal(clean('\u2764\ufe0f'), '\u2764\ufe0f', '❤️ 은 변형 선택자를 유지');
+  const england = '\u{1f3f4}\u{e0067}\u{e0062}\u{e0065}\u{e006e}\u{e0067}\u{e007f}';
+  assert.equal(clean(england), england, '🏴󠁧󠁢󠁥󠁮󠁧󠁿 은 태그 문자를 유지');
+  assert.equal(clean('A\ufe0f'), 'A\ufe0f');
+  assert.equal(clean('^^'), '^^', '기호만으로 된 닉네임은 보이는 글자다');
+  assert.equal(clean('...'), '...');
+  assert.equal(clean('🇰🇷'), '🇰🇷');
+});
+
+test('랭킹: 보이는 글자가 없는 닉네임의 행은 건너뛴다', () => {
+  const env = createEnv({
+    rows: [HEADER, row(1, '\u2800', 90), row(2, '\u115f\u1160', 80), row(3, '\ufe0f', 70), row(4, 'ok', 10)],
+  });
+  assert.deepEqual(get(env, {}).data.map((r) => r.nickname), ['ok']);
+});
+
+// ── 닉네임 열 서식 (날짜/숫자/불리언으로 바뀌는 닉네임) ───────────
+
+test('제출: 닉네임 열을 일반 텍스트로 한 번만 고정한다 (setup 을 건너뛴 수동 배포 포함)', () => {
+  const env = createEnv(); // setup() 없이 SHEET_ID 만 있는 상태
+  assert.deepEqual(post(env, valid({ nickname: '3-4' })), { ok: true });
+  assert.deepEqual(env.sheet.numberFormats, [['B:B', '@']]);
+  assert.equal(env.props.get('NICKNAME_TEXT_FORMAT'), SHEET_ID);
+  env.now += 11000;
+  assert.deepEqual(post(env, valid({ nickname: '1/2', playTimeMs: 90001 })), { ok: true });
+  assert.equal(env.sheet.numberFormats.length, 1, '두 번째 제출은 서식을 다시 지정하지 않는다');
+});
+
+test('제출: 서식 지정이 실패해도 제출은 성공하고 원인은 로그에 남는다', () => {
+  const env = createEnv();
+  env.sheet.formatError = new Error('Exception: format denied');
+  assert.deepEqual(post(env, valid()), { ok: true });
+  assert.equal(env.sheet.rows.length, 2);
+  assert.equal(env.errors.length, 1);
+  assert.match(env.errors[0], /format denied/);
+  assert.equal(env.props.has('NICKNAME_TEXT_FORMAT'), false, '실패했으니 다음 제출에서 다시 시도한다');
+});
+
+test('랭킹: 날짜/불리언으로 바뀐 닉네임 셀은 시트에 보이는 문자열로 보여 주고 행을 버리지 않는다', () => {
+  const coerced = new Date(2026, 2, 4); // "3-4" 가 날짜 셀이 된 경우
+  const env = createEnv({ rows: [HEADER, row(1, coerced, 900), row(2, true, 800), row(3, 'plain', 700), row(4, 7, 600)] });
+  env.sheet.displayOf = (v) => (Object.prototype.toString.call(v) === '[object Date]' ? '3월 4일' : v === true ? 'TRUE' : String(v));
+  assert.deepEqual(get(env, {}).data.map((r) => [r.nickname, r.score]), [['3월 4일', 900], ['TRUE', 800], ['plain', 700], ['7', 600]]);
+  assert.equal(env.sheet.reads, 2, '값 읽기 1번 + 표시값 읽기 1번 (표시값은 필요할 때 한 번만)');
+});
+
+test('랭킹: 닉네임 셀이 모두 문자열/숫자면 표시값을 따로 읽지 않는다', () => {
+  const env = createEnv({ rows: [HEADER, row(1, 'a', 3), row(2, 12, 2)] });
+  env.sheet.displayOf = () => {
+    throw new Error('표시값을 읽으면 안 됨');
+  };
+  assert.deepEqual(get(env, {}).data.map((r) => r.nickname), ['a', '12']);
+});
+
 // ── 타당성 검사 ──────────────────────────────────────────
 
 test('타당성: 점수 상한은 드롭당 이론 최댓값을 넘고 약간의 여유만 둔다', () => {
@@ -585,16 +677,90 @@ test('throttle: 같은 clientId 는 10초 안에 다시 제출할 수 없다', (
   assert.deepEqual(post(env, valid()), { ok: true });
   assert.deepEqual(env.cachePuts.at(-1), { key: 'thr:' + CID, sec: 10 });
 
+  // 같은 판이 아니라 새 판(플레이 시간이 다름)을 연달아 보내는 경우
   env.now += 3000;
-  assert.deepEqual(post(env, valid()), { ok: false, error: 'throttled' });
+  assert.deepEqual(post(env, valid({ playTimeMs: 90001 })), { ok: false, error: 'throttled' });
   env.now += 6000;
-  assert.deepEqual(post(env, valid()), { ok: false, error: 'throttled' });
+  assert.deepEqual(post(env, valid({ playTimeMs: 90002 })), { ok: false, error: 'throttled' });
   assert.equal(env.sheet.rows.length, 2, '막힌 요청은 행을 추가하지 않는다');
   assert.equal(env.lockHeld, false, '막혀도 락을 풀어야 한다');
 
   env.now += 1001; // 첫 제출로부터 10초 경과
-  assert.deepEqual(post(env, valid()), { ok: true });
+  assert.deepEqual(post(env, valid({ playTimeMs: 90003 })), { ok: true });
   assert.equal(env.sheet.rows.length, 3);
+});
+
+// ── 재전송 (응답이 유실된 뒤 같은 판을 다시 보내는 경우) ─────────────
+
+test('재전송: 같은 판을 다시 보내면 성공으로 답하고 행을 늘리지 않는다 (빈도 제한 창 안/밖 모두)', () => {
+  const env = createEnv();
+  assert.deepEqual(post(env, valid()), { ok: true });
+  assert.equal(env.sheet.rows.length, 2);
+
+  env.now += 3000; // 수동 재시도: "너무 자주" 가 아니라 성공이어야 한다 (이미 저장됐으므로)
+  assert.deepEqual(post(env, valid()), { ok: true });
+  env.now += 20000; // 다음 접속 때 자동 재전송: 빈도 제한 창이 지난 뒤
+  assert.deepEqual(post(env, valid()), { ok: true });
+  env.now += 3 * 86400000; // 며칠 뒤에도 (캐시는 이미 만료)
+  assert.deepEqual(post(env, valid()), { ok: true });
+
+  assert.equal(env.sheet.rows.length, 2, '같은 판이 여러 줄로 쌓이면 안 된다');
+  assert.equal(env.lockHeld, false);
+  assert.deepEqual(get(env, {}).data.map((r) => r.score), [321]);
+});
+
+test('재전송: 캐시가 비어도 시트를 보고 가려낸다', () => {
+  const env = createEnv();
+  post(env, valid());
+  env.cache.clear();
+  assert.deepEqual(post(env, valid()), { ok: true });
+  assert.equal(env.sheet.rows.length, 2);
+});
+
+test('재전송: 닉네임을 고쳐 다시 보내도 같은 판이다 (처음 저장된 닉네임이 남는다)', () => {
+  const env = createEnv();
+  post(env, valid({ nickname: '처음' }));
+  assert.deepEqual(post(env, valid({ nickname: '고친 뒤' })), { ok: true });
+  assert.equal(env.sheet.rows.length, 2);
+  assert.equal(env.sheet.rows[1][1], '처음');
+});
+
+test('재전송: 점수/최고 단계/플레이 시간/드롭 수 중 하나라도 다르면 새 판이다', () => {
+  const env = createEnv();
+  post(env, valid());
+  const others = [{ score: 322 }, { maxLevel: 6 }, { playTimeMs: 90001 }, { drops: 81 }];
+  for (const over of others) {
+    env.now += 11000; // 빈도 제한 창 밖
+    assert.deepEqual(post(env, valid(over)), { ok: true }, JSON.stringify(over));
+  }
+  assert.equal(env.sheet.rows.length, 2 + others.length);
+});
+
+test('재전송: 다른 clientId 의 같은 기록과 clientId 없는 요청은 새 기록이다', () => {
+  const env = createEnv();
+  post(env, valid());
+  assert.deepEqual(post(env, valid({ clientId: 'zyxwvutsrqponmlk9876' })), { ok: true });
+  assert.deepEqual(post(env, valid({ clientId: undefined })), { ok: true });
+  assert.deepEqual(post(env, valid({ clientId: undefined })), { ok: true });
+  assert.equal(env.sheet.rows.length, 5);
+});
+
+test('재전송: 숫자 셀로 바뀐 값이나 헤더만 있는 시트에서도 안전하게 동작한다', () => {
+  const env = createEnv({ rows: [HEADER, [new Date(1), 'x', '321', '7', '90000', '80', CID]] });
+  assert.deepEqual(post(env, valid()), { ok: true }, '문자열로 저장된 숫자도 같은 판으로 본다');
+  assert.equal(env.sheet.rows.length, 2);
+  const empty = createEnv({ rows: [HEADER] });
+  assert.deepEqual(post(empty, valid()), { ok: true });
+  assert.equal(empty.sheet.rows.length, 2);
+});
+
+test('재전송: 최근 행만 훑는다 (읽는 범위 상한)', () => {
+  const rows = [HEADER];
+  for (let i = 0; i < 700; i++) rows.push([new Date(i), 'n' + i, 10, 1, 1000 + i, 5, 'otherclient' + String(i).padStart(8, '0')]);
+  const env = createEnv({ rows });
+  post(env, valid());
+  assert.equal(env.sheet.rows.length, 702);
+  assert.equal(env.sheet.reads, 1, '700행 전체가 아니라 최근 행만 한 번에 읽는다');
 });
 
 test('throttle: 다른 clientId 와 clientId 없는 요청은 막지 않는다', () => {
@@ -662,6 +828,7 @@ test('setup: SHEET_ID 저장, scores 시트와 7열 헤더 생성, 헤더 고정
   assert.deepEqual(env.sheet.rows, [HEADER]);
   assert.equal(env.sheet.frozenRows, 1);
   assert.deepEqual(env.sheet.numberFormats, [['B:B', '@']], '닉네임 열은 일반 텍스트');
+  assert.equal(env.props.get('NICKNAME_TEXT_FORMAT'), SHEET_ID, '제출 때 같은 서식을 되풀이하지 않도록 표시');
   const log = env.logs.join('\n');
   assert.match(log, new RegExp(SHEET_ID));
   assert.match(log, /웹 앱/);
@@ -669,6 +836,7 @@ test('setup: SHEET_ID 저장, scores 시트와 7열 헤더 생성, 헤더 고정
 
   // 설정 직후 바로 동작한다
   assert.deepEqual(post(env, valid()), { ok: true });
+  assert.deepEqual(env.sheet.numberFormats, [['B:B', '@']], 'setup 에서 한 서식을 제출이 되풀이하지 않는다');
   assert.deepEqual(env.openedIds, [SHEET_ID]);
   assert.equal(get(env, {}).data[0].nickname, '수박왕');
 });

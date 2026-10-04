@@ -25,6 +25,7 @@ const MATTER_FILE = path.join(ROOT, 'node_modules/matter-js/build/matter.min.js'
 const CDN_MATTER = 'https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js';
 const FAKE_API_URL = 'https://script.google.com/macros/s/TEST/exec';
 const FAKE_API_RE = /^https:\/\/script\.google\.com\/macros\/s\/TEST\/exec(\?.*)?$/;
+const API_URL_LINE_RE = /^export const API_URL = .*;$/m;
 const CLIENT_ID_RE = /^[A-Za-z0-9_-]{16,64}$/;
 const XSS_NICK = '<img src=x onerror=alert(1)>';
 
@@ -83,11 +84,24 @@ export async function launchBrowser() {
   return chromium.launch({ headless, executablePath });
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// 조건이 참이 될 때까지 기다린다 (Node 쪽 상태를 기다릴 때 쓴다)
+async function until(fn, what, timeoutMs = 5000) {
+  const t0 = Date.now();
+  while (!fn()) {
+    if (Date.now() - t0 > timeoutMs) assert.fail(`시간 안에 ${what} 이(가) 일어나지 않음`);
+    await sleep(25);
+  }
+}
+
 // 가짜 Apps Script. GET ranking / POST submit 프로토콜을 흉내 내고 요청을 기록한다.
 export function createFakeApi({ rows = [], postQueue = [] } = {}) {
   const api = {
     rows,
     postQueue, // 'ok' | 'server_busy' | 'throttled' | 'invalid_nickname' | 'abort' | 'html' (한 번씩 소진, 비면 ok)
+    getDelayMs: 0, // 응답을 늦춰서 '늦게 도착한 이전 응답' 경합을 만든다
+    postDelayMs: 0,
     gets: [],
     posts: [],
     async handle(route) {
@@ -107,6 +121,7 @@ export function createFakeApi({ rows = [], postQueue = [] } = {}) {
         api.gets.push(u);
         const limit = Number(u.searchParams.get('limit')) || 10;
         const sorted = [...api.rows].sort((a, b) => b.score - a.score).slice(0, limit);
+        if (api.getDelayMs) await sleep(api.getDelayMs);
         await json({ ok: true, data: sorted });
         return;
       }
@@ -114,6 +129,7 @@ export function createFakeApi({ rows = [], postQueue = [] } = {}) {
       const post = { headers: headersAll, raw: req.postData() ?? '' };
       try { post.body = JSON.parse(post.raw); } catch { post.body = null; }
       api.posts.push(post);
+      if (api.postDelayMs) await sleep(api.postDelayMs);
       const mode = api.postQueue.shift() ?? 'ok';
       if (mode === 'abort') return route.abort('failed');
       if (mode === 'html') {
@@ -144,22 +160,24 @@ export async function openPage(browser, server, o = {}) {
     viewport = { width: 1280, height: 720 },
     mobile = false,
     deviceScaleFactor = mobile ? 3 : 1,
-    fakeApi = null, // 주면 config.js 의 API_URL 을 가짜 URL 로 바꾸고 해당 URL 을 가로챈다
+    fakeApi = null, // 주면 API_URL 을 가짜 URL 로 바꾸고 해당 URL 을 가로챈다. 없으면 API_URL 은 항상 '' (오프라인)
     storage = {}, // 페이지 로드 전에 넣어 둘 localStorage (최초 1회만)
     ignore = [], // 허용할 콘솔 오류/요청 실패 메시지 패턴
+    reducedMotion = 'no-preference',
   } = o;
-  const ctx = await browser.newContext({ viewport, isMobile: mobile, hasTouch: mobile, deviceScaleFactor, locale: 'ko-KR' });
+
+  // 배포 뒤 config.js 에 운영 URL 이 들어가도 테스트가 외부로 나가거나 깨지지 않도록 모든 시나리오에서 API_URL 을 고정한다.
+  const configSrc = await fs.readFile(path.join(ROOT, 'js/config.js'), 'utf8');
+  assert.match(configSrc, API_URL_LINE_RE, 'config.js 의 API_URL 선언 형태가 바뀌었다 (테스트가 치환하지 못함)');
+  const patchedConfig = configSrc.replace(API_URL_LINE_RE, () => `export const API_URL = '${fakeApi ? FAKE_API_URL : ''}';`);
+
+  const ctx = await browser.newContext({ viewport, isMobile: mobile, hasTouch: mobile, deviceScaleFactor, locale: 'ko-KR', reducedMotion });
 
   await ctx.route(CDN_MATTER, (route) => route.fulfill({ path: MATTER_FILE, contentType: 'text/javascript' }));
-  if (fakeApi) {
-    const src = await fs.readFile(path.join(ROOT, 'js/config.js'), 'utf8');
-    assert.match(src, /export const API_URL = '';/, 'config.js 의 API_URL 선언 형태가 바뀌었다 (테스트가 치환하지 못함)');
-    const patched = src.replace("export const API_URL = '';", `export const API_URL = '${FAKE_API_URL}';`);
-    await ctx.route('**/js/config.js', (route) => route.fulfill({
-      status: 200, contentType: 'text/javascript; charset=utf-8', headers: { 'cache-control': 'no-store' }, body: patched,
-    }));
-    await ctx.route(FAKE_API_RE, (route) => fakeApi.handle(route));
-  }
+  await ctx.route('**/js/config.js', (route) => route.fulfill({
+    status: 200, contentType: 'text/javascript; charset=utf-8', headers: { 'cache-control': 'no-store' }, body: patchedConfig,
+  }));
+  if (fakeApi) await ctx.route(FAKE_API_RE, (route) => fakeApi.handle(route));
   if (Object.keys(storage).length) {
     await ctx.addInitScript((items) => {
       try {
@@ -199,7 +217,7 @@ export function remainingIssues(env) {
 
 export async function loadGame(env, search = '?debug') {
   await env.page.goto(`${env.server.origin}/${search}`);
-  if (search.includes('debug')) await env.page.waitForFunction(() => !!window.__fruit);
+  if (new URLSearchParams(search).has('debug')) await env.page.waitForFunction(() => !!window.__fruit);
   await env.page.waitForFunction(() => document.getElementById('game-canvas').width > 100);
   await env.page.evaluate(() => document.fonts?.ready);
 }
@@ -307,14 +325,18 @@ async function layoutMetrics(page) {
   });
 }
 
-function assertLayout(m, label) {
+// opts.minCanvasW: 게임판 최소 폭. opts.sideBySide: 가로 모드(HUD/진화 줄이 게임판 옆에 있어야 함)
+function assertLayout(m, label, { minCanvasW = 200, sideBySide = false } = {}) {
   const eps = 0.75;
   const within = (name, r) => {
     assert.ok(r.l >= -eps && r.t >= -eps && r.r <= m.vw + eps && r.b <= m.vh + eps, `${label}: ${name} 이(가) 화면 밖 ${JSON.stringify(r)} / ${m.vw}x${m.vh}`);
   };
   for (const name of ['canvas', 'stage', 'hud', 'evo', 'mute', 'next']) within(name, m[name]);
   assert.ok(Math.abs(m.canvas.w / m.canvas.h - 2 / 3) < 0.01, `${label}: 캔버스 비율 2:3 아님 (${m.canvas.w}x${m.canvas.h})`);
-  assert.ok(m.canvas.w > 200, `${label}: 캔버스가 너무 작음 ${m.canvas.w}`);
+  assert.ok(m.canvas.w > minCanvasW, `${label}: 캔버스가 너무 작음 ${m.canvas.w}`);
+  if (sideBySide) {
+    assert.ok(m.hud.l >= m.stage.r - eps && m.evo.l >= m.stage.r - eps, `${label}: HUD/진화 줄이 게임판과 겹침`);
+  }
   const wantW = m.canvas.w * Math.min(m.dpr, 3);
   assert.ok(Math.abs(m.canvasPx.w - wantW) <= 1.5, `${label}: 캔버스 백킹 해상도 ${m.canvasPx.w} != css*dpr ${wantW}`);
   assert.ok(m.scroll.dw <= m.vw && m.scroll.dh <= m.vh && m.scroll.bw <= m.vw && m.scroll.bh <= m.vh, `${label}: 페이지가 스크롤됨 ${JSON.stringify(m.scroll)}`);
@@ -350,10 +372,17 @@ scenario('a', '로드: 오류 없음, 시작 화면, Matter 존재, 프로덕션
     return c.getContext('2d').getImageData(c.width >> 1, c.height >> 1, 1, 1).data[3];
   });
   assert.equal(alpha, 255, '캔버스가 비어 있음');
-  // 디버그 훅은 ?debug 일 때만
-  await page.goto(`${env.server.origin}/`);
-  await page.waitForFunction(() => document.getElementById('game-canvas').width > 100);
-  assert.equal(await page.evaluate(() => typeof window.__fruit), 'undefined');
+  // 핀치 확대를 막으면 저시력 사용자가 쓸 수 없다 (WCAG 1.4.4). 확대 방지는 CSS touch-action 으로 충분하다.
+  const viewportMeta = await page.locator('meta[name=viewport]').getAttribute('content');
+  assert.ok(!/user-scalable|maximum-scale/i.test(viewportMeta), `뷰포트 메타가 확대를 막음: ${viewportMeta}`);
+  // 디버그 훅은 ?debug 파라미터가 있을 때만 (이름에 'debug' 가 들어 있을 뿐인 쿼리는 해당 없음)
+  for (const search of ['', '?nodebug=1', '?utm_campaign=debug-day', '?debugger']) {
+    await page.goto(`${env.server.origin}/${search}`);
+    await page.waitForFunction(() => document.getElementById('game-canvas').width > 100);
+    assert.equal(await page.evaluate(() => typeof window.__fruit), 'undefined', `${search || '(쿼리 없음)'} 에서 디버그 훅이 노출됨`);
+  }
+  await page.goto(`${env.server.origin}/?x=1&debug=1`);
+  await page.waitForFunction(() => !!window.__fruit);
 });
 
 scenario('b', '시작 → 마우스 이동+클릭으로 드롭, 상자 안에 안착, 쿨다운', {}, async (env) => {
@@ -397,6 +426,22 @@ scenario('b', '시작 → 마우스 이동+클릭으로 드롭, 상자 안에 �
   assert.equal((await bodiesOf(page)).length, 3);
   assert.equal((await gameInfo(page)).drops, 3);
   await settleChecked(page, 5000);
+});
+
+scenario('b2', '가장자리: 왼쪽/오른쪽 끝을 눌러도 과일이 벽 안쪽(반지름만큼)에 놓인다', {}, async (env) => {
+  const { page } = env;
+  await loadGame(env);
+  await startGame(page);
+  await pause(page);
+  for (const [wx, side] of [[1, 'left'], [399, 'right'], [399.9, 'right']]) {
+    await mouseDrop(page, wx);
+    const b = (await bodiesOf(page)).sort((p, q) => q.id - p.id)[0];
+    const r = FRUITS[b.level].radius;
+    const want = side === 'left' ? r : WORLD.width - r;
+    assert.ok(Math.abs(b.x - want) < 0.5, `${side} 끝 보정 x=${b.x} (기대 ${want})`);
+    await advance(page, TIMING.dropCooldown);
+  }
+  await settleChecked(page, 3000);
 });
 
 scenario('c', '결정적 합치기: 쌍, 3개, 연쇄 사다리 (중복 없음, 점수)', {}, async (env) => {
@@ -697,6 +742,8 @@ scenario('f', '재시작: 바디/점수/배너 초기화, 다시 플레이 가�
 scenario('g', '오프라인(API_URL 없음): 제출 폼 숨김, 안내 문구, 외부 호출 없음', {}, async (env) => {
   const { page } = env;
   await loadGame(env);
+  // 하네스가 API_URL 을 항상 ''로 고정하므로, 운영 URL 이 config.js 에 들어 있어도 이 시나리오는 오프라인이다
+  assert.equal(await page.evaluate(() => import('./js/config.js').then((m) => m.API_URL)), '');
   // 시작 화면의 랭킹 보기
   await page.click('#btn-view-ranking');
   assert.ok(await isVisible(page, '#screen-ranking'));
@@ -873,6 +920,78 @@ scenario('h3', 'API 모드: 빈 랭킹 안내, 서버 오류 시 랭킹 실패 �
   assert.equal((await bodiesOf(page)).length, 1);
 });
 
+scenario('h4', 'API 모드: 부팅 때 재전송이 재시도 가능한 오류로 실패하면 보관분을 지키고, 영구 오류면 지운다', {
+  fakeApi: () => createFakeApi({ rows: [], postQueue: ['server_busy'] }),
+  storage: {
+    [STORAGE_KEYS.pending]: JSON.stringify({ nickname: '보관', score: 77, maxLevel: 3, playTimeMs: 20000, drops: 12, clientId: 'abcdefghijklmnop1234' }),
+  },
+}, async (env) => {
+  const { page } = env;
+  const api = env.fakeApi;
+  const kept = async () => JSON.parse((await lsGet(page, STORAGE_KEYS.pending)) ?? 'null');
+  await loadGame(env);
+  await until(() => api.posts.length === 1, '첫 재전송');
+  await page.waitForTimeout(250); // 응답 처리 시간
+  assert.equal((await kept())?.score, 77, 'server_busy 로 실패했는데 보관분이 사라짐');
+
+  // 다음 접속: 이번에는 서버가 영구 오류로 거절한다 -> 더 보내 봐야 소용없으니 지운다
+  api.postQueue.push('invalid_nickname');
+  await page.reload();
+  await until(() => api.posts.length === 2, '두 번째 재전송');
+  await page.waitForFunction(() => localStorage.getItem('fruit.pendingScore') === null);
+  assert.equal(api.posts[1].body.score, 77);
+
+  // throttled 는 시간이 지나면 풀리는 오류라 보관분을 지킨다
+  await page.evaluate(([k, v]) => localStorage.setItem(k, v), [STORAGE_KEYS.pending, JSON.stringify({ nickname: '보관', score: 78, maxLevel: 3, playTimeMs: 20000, drops: 12, clientId: 'abcdefghijklmnop1234' })]);
+  api.postQueue.push('throttled');
+  await page.reload();
+  await until(() => api.posts.length === 3, '세 번째 재전송');
+  await page.waitForTimeout(250);
+  assert.equal((await kept())?.score, 78, 'throttled 인데 보관분이 사라짐');
+});
+
+scenario('h5', 'API 모드: 늦게 도착한 이전 응답은 화면을 건드리지 않는다 (랭킹 닫기/다음 판 시작 뒤)', {
+  fakeApi: () => createFakeApi({ rows: sampleRows(3, false) }),
+}, async (env) => {
+  const { page } = env;
+  const api = env.fakeApi;
+  await loadGame(env);
+
+  // 1) 랭킹을 열었다가 응답이 오기 전에 닫는다: 늦게 온 응답이 닫힌 목록에 그려지면 안 된다
+  api.getDelayMs = 600;
+  await page.click('#btn-view-ranking');
+  await until(() => api.gets.length === 1, '랭킹 요청');
+  await page.keyboard.press('Escape');
+  assert.ok(await isVisible(page, '#screen-start'));
+  await page.waitForTimeout(900);
+  assert.equal(await page.locator('#ranking-view-list > li').count(), 0, '닫은 뒤 도착한 응답이 목록에 그려짐');
+  api.getDelayMs = 0;
+  await page.click('#btn-view-ranking');
+  await page.waitForFunction(() => document.querySelectorAll('#ranking-view-list > li').length === 3);
+  await page.keyboard.press('Escape');
+
+  // 2) 제출 응답이 오기 전에 다음 판을 시작한다: 새 판의 결과 화면 상태(버튼/입력/문구)가 오염되면 안 된다
+  await startGame(page);
+  await mouseDrop(page, 200);
+  await pause(page);
+  await advance(page, 1000);
+  await page.evaluate(() => window.__fruit.forceGameOver());
+  await page.fill('#input-nickname', '느린응답');
+  api.postDelayMs = 600;
+  await page.click('#btn-submit');
+  await until(() => api.posts.length === 1, '제출 요청');
+  await restartGame(page);
+  await page.waitForTimeout(900); // 이전 판의 제출 응답(ok)이 이제 도착한다
+  const panel = await page.evaluate(() => ({
+    label: document.getElementById('btn-submit').textContent,
+    disabled: document.getElementById('input-nickname').disabled,
+    status: document.getElementById('submit-status').textContent,
+    rows: document.querySelectorAll('#ranking-list > li').length,
+  }));
+  assert.deepEqual(panel, { label: '랭킹 등록', disabled: false, status: '', rows: 0 }, '이전 판의 응답이 새 판의 결과 화면 상태를 바꿈');
+  assert.equal(await lsGet(page, STORAGE_KEYS.pending), null, '성공했으니 보관분은 없다');
+});
+
 const VIEWPORTS = [
   { id: 'mobile 390x844', viewport: { width: 390, height: 844 }, mobile: true },
   { id: 'mobile 320x568', viewport: { width: 320, height: 568 }, mobile: true },
@@ -931,6 +1050,91 @@ for (const [i, v] of VIEWPORTS.entries()) {
   });
 }
 
+// 가로로 눕힌 폰과 200~300% 확대한 데스크톱: 게임판이 쪼그라들거나 버튼/입력이 잘리면 안 된다
+const LANDSCAPE_VIEWPORTS = [
+  { id: 'landscape 667x375', viewport: { width: 667, height: 375 }, mobile: true },
+  { id: 'landscape 568x320', viewport: { width: 568, height: 320 }, mobile: true },
+  { id: 'landscape 844x390', viewport: { width: 844, height: 390 }, mobile: true },
+  { id: 'zoom 300% 427x240', viewport: { width: 427, height: 240 }, mobile: false },
+];
+
+// 화면 안에 완전히 들어오고, 그 자리에서 실제로 눌리는지 (다른 요소가 덮고 있지 않은지)
+const reachable = (page, sel) => page.evaluate((q) => {
+  const el = document.querySelector(q);
+  const b = el.getBoundingClientRect();
+  if (b.left < 0 || b.top < 0 || b.right > innerWidth || b.bottom > innerHeight) return false;
+  const hit = document.elementFromPoint((b.left + b.right) / 2, (b.top + b.bottom) / 2);
+  return !!hit && (hit === el || el.contains(hit));
+}, sel);
+
+for (const [i, v] of LANDSCAPE_VIEWPORTS.entries()) {
+  scenario(`n${i + 1}`, `가로 모드 ${v.id}: 게임판은 높이를 다 쓰고, 시작 버튼/닉네임 입력/등록 버튼이 쓸 만하다`, {
+    viewport: v.viewport,
+    mobile: v.mobile,
+    fakeApi: () => createFakeApi({ rows: sampleRows(10) }),
+  }, async (env) => {
+    const { page } = env;
+    const api = env.fakeApi;
+    const tap = (sel) => (v.mobile ? page.tap(sel) : page.click(sel));
+    await loadGame(env);
+
+    let m = await layoutMetrics(page);
+    assertLayout(m, `${v.id} 시작 화면`, { minCanvasW: 120, sideBySide: true });
+    assert.ok(m.stage.h >= m.vh - 20, `${v.id}: 게임판이 높이를 다 쓰지 못함 (${m.stage.h}/${m.vh})`);
+    assert.ok(await reachable(page, '#btn-start'), `${v.id}: 게임 시작 버튼이 첫 화면에서 안 보이거나 가려짐`);
+    assert.ok(await reachable(page, '#btn-view-ranking'), `${v.id}: 랭킹 보기 버튼이 안 보임`);
+
+    await tap('#btn-start');
+    await page.waitForFunction(() => window.__fruit.getState() === 'READY');
+    assertLayout(await layoutMetrics(page), `${v.id} 플레이 중`, { minCanvasW: 120, sideBySide: true });
+    const p = await worldToClient(page, 90, 250);
+    if (v.mobile) await page.touchscreen.tap(p.x, p.y);
+    else await page.mouse.click(p.x, p.y);
+    const bs = await bodiesOf(page);
+    assert.equal(bs.length, 1, '탭/클릭으로 드롭되어야 함');
+    assert.ok(Math.abs(bs[0].x - 90) < 3, `드롭 x=${bs[0].x}`);
+    await pause(page);
+
+    // 게임오버: 닉네임 입력이 글자를 보여 줄 만큼 넓고, 등록 버튼이 패널 밖으로 잘리지 않는다
+    await page.evaluate(() => window.__fruit.forceGameOver());
+    await page.waitForFunction(() => document.querySelectorAll('#ranking-list > li').length === 10);
+    assert.ok(await reachable(page, '#btn-restart'), `${v.id}: 다시 하기 버튼이 안 보임`);
+    const form = await page.evaluate(() => {
+      const panel = document.querySelector('#screen-gameover .panel').getBoundingClientRect();
+      const input = document.getElementById('input-nickname');
+      const cs = getComputedStyle(input);
+      const ib = input.getBoundingClientRect();
+      const sb = document.getElementById('btn-submit').getBoundingClientRect();
+      return {
+        panel: { l: panel.left, r: panel.right, t: panel.top, b: panel.bottom },
+        content: input.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight),
+        input: { l: ib.left, r: ib.right },
+        submit: { l: sb.left, r: sb.right },
+      };
+    });
+    assert.ok(form.content >= 80, `${v.id}: 닉네임 입력의 글자 영역이 ${form.content}px 뿐`);
+    for (const [name, r] of [['입력창', form.input], ['등록 버튼', form.submit]]) {
+      assert.ok(r.l >= form.panel.l - 0.5 && r.r <= form.panel.r + 0.5, `${v.id}: ${name}이 패널 밖으로 잘림 ${JSON.stringify(r)} / ${JSON.stringify(form.panel)}`);
+    }
+    assert.ok(form.panel.t >= 0 && form.panel.b <= m.vh + 0.5 && form.panel.r <= m.vw + 0.5, `${v.id}: 게임오버 패널이 화면 밖으로 나감`);
+
+    // 실제로 입력하고 등록할 수 있다 (가려져 있으면 Playwright 의 클릭이 실패한다)
+    await page.locator('#input-nickname').scrollIntoViewIfNeeded();
+    await page.locator('#input-nickname').click();
+    await page.keyboard.type('가로모드');
+    assert.equal(await page.inputValue('#input-nickname'), '가로모드');
+    await page.locator('#btn-submit').scrollIntoViewIfNeeded();
+    await tap('#btn-submit');
+    await page.waitForFunction(() => document.getElementById('btn-submit').textContent === '등록 완료');
+    assert.equal(api.posts.length, 1);
+    assert.equal(api.posts[0].body.nickname, '가로모드');
+
+    await tap('#btn-restart');
+    await page.waitForFunction(() => window.__fruit.getState() === 'READY');
+    assert.equal((await bodiesOf(page)).length, 0);
+  });
+}
+
 scenario('j', '키보드: ←/→ 이동, Space 드롭, 닉네임 입력은 게임을 건드리지 않음', {
   fakeApi: () => createFakeApi({ rows: sampleRows(3, false) }),
 }, async (env) => {
@@ -957,13 +1161,16 @@ scenario('j', '키보드: ←/→ 이동, Space 드롭, 닉네임 입력은 게�
   assert.equal(bs.length, 2);
   assert.ok(bs[1].x > leftX + 100, `오른쪽으로 이동하지 않음 x=${bs[1].x}`);
 
-  // 누르고 있어도(repeat) 한 번만 드롭
+  // 누르고 있어도(repeat) 한 번만 드롭. 반복 입력 사이에 쿨다운이 지나가게 해서, 쿨다운이 아니라 repeat 검사가 막는지 본다.
   await advance(page, TIMING.dropCooldown);
   await page.keyboard.down('Space');
-  await page.keyboard.down('Space');
-  await page.keyboard.down('Space');
+  await advance(page, TIMING.dropCooldown);
+  assert.equal(await stateOf(page), 'READY');
+  await page.keyboard.down('Space'); // repeat
+  await advance(page, TIMING.dropCooldown);
+  await page.keyboard.down('Space'); // repeat
   await page.keyboard.up('Space');
-  assert.equal((await bodiesOf(page)).length, 3);
+  assert.equal((await bodiesOf(page)).length, 3, '누르고 있는 Space 의 자동 반복이 드롭이 됨');
 
   // 게임오버 뒤 닉네임 입력: 이동/드롭/재시작 없음
   await page.evaluate(() => window.__fruit.forceGameOver());
@@ -992,10 +1199,12 @@ scenario('k', '음소거 버튼: aria-pressed 토글, 저장, 새로고침 후 �
   await loadGame(env);
   const mute = page.locator('#btn-mute');
   assert.equal(await mute.getAttribute('aria-pressed'), 'false');
+  assert.equal(await mute.getAttribute('aria-label'), '음소거');
   await mute.click();
   assert.equal(await mute.getAttribute('aria-pressed'), 'true');
   assert.equal(await lsGet(page, STORAGE_KEYS.muted), '1');
-  assert.equal(await mute.getAttribute('aria-label'), '소리 켜기');
+  // 토글 버튼은 이름이 상태에 따라 바뀌면 안 된다 ("소리 켜기, 눌림" 같은 모순된 낭독 방지)
+  assert.equal(await mute.getAttribute('aria-label'), '음소거');
   await page.reload();
   await page.waitForFunction(() => !!window.__fruit);
   assert.equal(await page.locator('#btn-mute').getAttribute('aria-pressed'), 'true', '새로고침 뒤에도 유지');
@@ -1099,20 +1308,69 @@ scenario('l', '프레임 정체: 메인 스레드가 오래 멈춰도 시뮬레�
   for (const bd of await bodiesOf(page)) assert.ok(inBox(bd));
 });
 
+// 경계선 바로 위(붉은 빛이 번지는 자리)의 초록 채널을 일정 간격으로 읽는다. 경고가 깜빡이면 값이 흔들린다.
+function sampleDangerGlow(page, durationMs = 700, everyMs = 35) {
+  return page.evaluate(([total, step, wy, wx]) => new Promise((resolve) => {
+    const canvas = document.getElementById('game-canvas');
+    const g = canvas.getContext('2d');
+    const k = canvas.width / 400;
+    const out = [];
+    const t0 = performance.now();
+    const tick = () => {
+      out.push(g.getImageData(Math.round(wx * k), Math.round(wy * k), 1, 1).data[1]);
+      if (performance.now() - t0 < total) setTimeout(tick, step);
+      else resolve(out);
+    };
+    tick();
+  }), [durationMs, everyMs, WORLD.dangerY - 6, 20]);
+}
+
+scenario('m', '모션 줄이기: 경계선 경고가 깜빡이지 않는다 (기본 설정에서는 깜빡이고, 실행 중 전환도 반영)', { reducedMotion: 'reduce', ignore: [/willReadFrequently/] }, async (env) => {
+  const { page } = env;
+  await loadGame(env);
+  assert.equal(await page.evaluate(() => matchMedia('(prefers-reduced-motion: reduce)').matches), true);
+  await startGame(page);
+  await pause(page);
+  await pinAboveLine(page, 3, 200);
+  await advance(page, TIMING.settleGrace + TIMING.overflow * 0.75);
+  const { danger, state } = await gameInfo(page);
+  assert.ok(danger >= 0.5 && danger < 1 && state !== 'GAME_OVER', `위험도 ${danger}`);
+
+  const spread = (xs) => Math.max(...xs) - Math.min(...xs);
+  const calm = await sampleDangerGlow(page);
+  assert.equal(spread(calm), 0, `모션 줄이기인데 경고가 깜빡임: ${calm}`);
+  // 깜빡이지 않아도 경고는 보여야 한다: 같은 가로줄의 경고 없는 자리보다 붉게(초록 채널이 낮게) 칠해진다
+  const outside = await page.evaluate(() => {
+    const c = document.getElementById('game-canvas');
+    return c.getContext('2d').getImageData(Math.round(20 * c.width / 400), Math.round(20 * c.width / 400), 1, 1).data[1];
+  });
+  assert.ok(calm[0] < outside - 15, `경고 표시가 없음: 경계선 위 ${calm[0]}, 배경 ${outside}`);
+
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  const blink = await sampleDangerGlow(page);
+  assert.ok(spread(blink) >= 15, `기본 설정에서는 깜빡여야 함: ${blink}`);
+
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.waitForTimeout(100);
+  const calmAgain = await sampleDangerGlow(page);
+  assert.equal(spread(calmAgain), 0, `실행 중 모션 줄이기로 바꿨는데 깜빡임: ${calmAgain}`);
+});
+
 // ───────────────────────── 실행 ─────────────────────────
 
 export async function runScenario(browser, server, sc) {
   const fakeApi = typeof sc.opts.fakeApi === 'function' ? sc.opts.fakeApi() : null;
-  const env = await openPage(browser, server, { ...sc.opts, fakeApi });
-  env.fakeApi = fakeApi;
+  let env = null;
   let error = null;
   try {
+    env = await openPage(browser, server, { ...sc.opts, fakeApi });
+    env.fakeApi = fakeApi;
     await sc.fn(env);
   } catch (e) {
-    error = e;
+    error = e; // 준비 단계 실패도 한 시나리오의 FAIL 로 보고하고 나머지는 계속 돌린다
   }
-  const issues = remainingIssues(env);
-  await env.ctx.close();
+  const issues = env ? remainingIssues(env) : [];
+  await env?.ctx.close();
   return { error, issues };
 }
 

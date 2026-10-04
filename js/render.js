@@ -9,6 +9,7 @@ const POP_PEAK = 0.5;   // 0.8 -> 1.12 구간이 차지하는 비율
 const EMOJI_K = 1.5;    // 이모지 글자 크기 / 반지름
 const SPRITE_K = 1.8;   // 스프라이트 한 변 / 반지름
 const BLINK_RAD_PER_MS = (TAU * 3) / 1000; // 경고 깜빡임 3Hz. 주파수를 고정해 위상이 튀지 않게 한다
+const REDUCED_MOTION_QUERY = '(prefers-reduced-motion: reduce)';
 const MAX_PARTICLES = 160;
 const MAX_RINGS = 24;
 const MAX_TEXTS = 10;
@@ -235,6 +236,23 @@ export function createRenderer(gameCanvas, nextCanvas) {
   const rings = [];
   const texts = [];
 
+  // 모션 줄이기를 켠 사용자에게는 깜빡임, 튀는 크기 변화, 파티클/링을 쓰지 않는다.
+  // 경계선 경고는 점멸 대신 고정된 붉은 강조로 같은 정보를 전한다. (CSS 애니메이션은 style.css 에서 따로 끈다)
+  let reduceMotion = false;
+  try {
+    const mq = typeof matchMedia === 'function' ? matchMedia(REDUCED_MOTION_QUERY) : null;
+    if (mq) {
+      reduceMotion = !!mq.matches;
+      mq.addEventListener?.('change', (e) => {
+        reduceMotion = !!e.matches;
+        if (reduceMotion) {
+          particles.length = 0;
+          rings.length = 0;
+        }
+      });
+    }
+  } catch (e) { /* 미지원 환경: 기본 모션 */ }
+
   function getCtx(canvas) {
     try {
       return canvas && canvas.getContext ? canvas.getContext('2d') : null;
@@ -344,7 +362,7 @@ export function createRenderer(gameCanvas, nextCanvas) {
     g.lineCap = 'butt';
     if (danger >= 0.5) {
       const k = (danger - 0.5) * 2;
-      const pulse = 0.5 + 0.5 * Math.sin(now * BLINK_RAD_PER_MS);
+      const pulse = reduceMotion ? 1 : 0.5 + 0.5 * Math.sin(now * BLINK_RAD_PER_MS);
       const glow = g.createLinearGradient(0, y - 34, 0, y);
       glow.addColorStop(0, 'rgba(229,57,53,0)');
       glow.addColorStop(1, `rgba(229,57,53,${(0.1 + 0.22 * k) * pulse})`);
@@ -481,8 +499,8 @@ export function createRenderer(gameCanvas, nextCanvas) {
       if (age >= e.life) continue;
       texts[w++] = e;
       const k = age / e.life;
-      const rise = 1 - (1 - k) * (1 - k);
-      const pop = age < 140 ? 0.6 + 0.55 * (age / 140) : age < 240 ? 1.15 - 0.15 * ((age - 140) / 100) : 1;
+      const rise = reduceMotion ? 0 : 1 - (1 - k) * (1 - k);
+      const pop = reduceMotion ? 1 : age < 140 ? 0.6 + 0.55 * (age / 140) : age < 240 ? 1.15 - 0.15 * ((age - 140) / 100) : 1;
       g.globalAlpha = k < 0.7 ? 1 : (1 - k) / 0.3;
       g.setTransform(scale * pop, 0, 0, scale * pop, e.x * scale, (e.y - e.rise * rise) * scale);
       g.font = `800 ${e.size}px ${UI_FONT}`;
@@ -523,7 +541,7 @@ export function createRenderer(gameCanvas, nextCanvas) {
         if (!b) continue;
         const lv = levelIndex(b.level);
         if (lv < 0 || !Number.isFinite(b.x) || !Number.isFinite(b.y)) continue;
-        drawFruit(g, lv, b.x, b.y, num(b.angle), popScale(b.popAge));
+        drawFruit(g, lv, b.x, b.y, num(b.angle), reduceMotion ? 1 : popScale(b.popAge));
       }
       g.setTransform(scale, 0, 0, scale, 0, 0);
     }
@@ -619,30 +637,33 @@ export function createRenderer(gameCanvas, nextCanvas) {
       const bonus = !!e.bonus;
       const r = f.radius;
 
-      const n = bonus ? 28 : 10 + Math.min(6, Math.round(lv * 0.6));
-      const spread = (bonus ? 1.4 : 1) * (0.8 + r / 120);
-      for (let i = 0; i < n; i++) {
-        const a = Math.random() * TAU;
-        const sp = (70 + Math.random() * 130) * spread;
-        particles.push({
-          x: e.x + Math.cos(a) * r * 0.6,
-          y: e.y + Math.sin(a) * r * 0.6,
-          vx: Math.cos(a) * sp,
-          vy: Math.sin(a) * sp - 50,
-          g: 320,
-          born: null,
-          life: 420 + Math.random() * 380,
-          size: Math.min(8, (2.4 + Math.random() * 2.6) * (0.75 + r / 90)),
-          color: bonus && i % 3 !== 0 ? GOLD[i % GOLD.length] : shade(f.color, (Math.random() - 0.35) * 0.7),
+      // 파티클과 링은 장식이라 모션 줄이기에서는 생략하고, 점수 글자만 제자리에 잠깐 보여 준다
+      if (!reduceMotion) {
+        const n = bonus ? 28 : 10 + Math.min(6, Math.round(lv * 0.6));
+        const spread = (bonus ? 1.4 : 1) * (0.8 + r / 120);
+        for (let i = 0; i < n; i++) {
+          const a = Math.random() * TAU;
+          const sp = (70 + Math.random() * 130) * spread;
+          particles.push({
+            x: e.x + Math.cos(a) * r * 0.6,
+            y: e.y + Math.sin(a) * r * 0.6,
+            vx: Math.cos(a) * sp,
+            vy: Math.sin(a) * sp - 50,
+            g: 320,
+            born: null,
+            life: 420 + Math.random() * 380,
+            size: Math.min(8, (2.4 + Math.random() * 2.6) * (0.75 + r / 90)),
+            color: bonus && i % 3 !== 0 ? GOLD[i % GOLD.length] : shade(f.color, (Math.random() - 0.35) * 0.7),
+          });
+        }
+        rings.push({
+          x: e.x, y: e.y, born: null, life: bonus ? 520 : 340,
+          r0: r * 0.8, r1: r * (bonus ? 2.2 : 1.5) + 10,
+          color: bonus ? '#ffc107' : f.color, w: bonus ? 6 : 4,
         });
-      }
-      rings.push({
-        x: e.x, y: e.y, born: null, life: bonus ? 520 : 340,
-        r0: r * 0.8, r1: r * (bonus ? 2.2 : 1.5) + 10,
-        color: bonus ? '#ffc107' : f.color, w: bonus ? 6 : 4,
-      });
-      if (bonus) {
-        rings.push({ x: e.x, y: e.y, born: null, life: 700, r0: r * 0.5, r1: r * 3, color: '#fff176', w: 4 });
+        if (bonus) {
+          rings.push({ x: e.x, y: e.y, born: null, life: 700, r0: r * 0.5, r1: r * 3, color: '#fff176', w: 4 });
+        }
       }
 
       if (Number.isFinite(e.points)) {
@@ -671,7 +692,7 @@ export function createRenderer(gameCanvas, nextCanvas) {
 
   function addDropEffect(e) {
     try {
-      if (!e || !Number.isFinite(e.x) || !Number.isFinite(e.y)) return;
+      if (reduceMotion || !e || !Number.isFinite(e.x) || !Number.isFinite(e.y)) return;
       const lv = Math.max(0, levelIndex(e.level));
       const f = FRUITS[lv];
       rings.push({

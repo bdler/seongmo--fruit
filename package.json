@@ -5,8 +5,12 @@
   "description": "수박 합치기 — HTML5 Canvas + Matter.js 게임, Google Apps Script 랭킹",
   "scripts": {
     "serve": "python3 -m http.server 8000",
-    "test": "node --test \"tests/*.test.mjs\"",
+    "test": "node --test",
+    "e2e:install": "playwright-core install chromium",
     "test:e2e": "node tests/e2e/smoke.mjs"
+  },
+  "engines": {
+    "node": ">=20"
   },
   "devDependencies": {
     "matter-js": "0.19.0",
