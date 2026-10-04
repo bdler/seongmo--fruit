@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <meta name="theme-color" content="#fff4d6">
+  <meta name="description" content="같은 과일을 합쳐 수박을 만들어 보세요!">
+  <title>수박 합치기</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🍉%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="./css/style.css">
+</head>
+<body>
+  <div id="app">
+    <header id="hud">
+      <div class="hud-block">
+        <span class="hud-label">점수</span>
+        <strong id="score">0</strong>
+      </div>
+      <div class="hud-block">
+        <span class="hud-label">최고</span>
+        <strong id="best">0</strong>
+      </div>
+      <div class="hud-block hud-next">
+        <span class="hud-label">다음</span>
+        <canvas id="next-canvas" width="64" height="64" aria-label="다음 과일"></canvas>
+      </div>
+      <button id="btn-mute" class="icon-btn" type="button" aria-pressed="false" aria-label="소리 끄기">🔊</button>
+    </header>
+
+    <main id="stage">
+      <canvas id="game-canvas" aria-label="과일 합치기 게임 화면"></canvas>
+      <div id="clear-banner" role="status" hidden>🍉 수박 완성!</div>
+
+      <section id="screen-start" class="overlay" aria-labelledby="start-title">
+        <div class="panel">
+          <h1 id="start-title">🍉 수박 합치기</h1>
+          <p>같은 과일끼리 합쳐 더 큰 과일로! 상자 밖으로 넘치기 전에 수박을 만들어 보세요.</p>
+          <ul class="how-to">
+            <li>화면을 누른 채 좌우로 움직여 위치를 정하고, 손을 떼면 과일이 떨어져요.</li>
+            <li>PC: ← → 로 이동, 스페이스로 떨어뜨리기</li>
+          </ul>
+          <p id="start-error" class="error" role="alert" hidden></p>
+          <div class="btn-row">
+            <button id="btn-start" class="btn primary" type="button">게임 시작</button>
+            <button id="btn-view-ranking" class="btn" type="button">🏆 랭킹 보기</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="screen-gameover" class="overlay" aria-labelledby="gameover-title" hidden>
+        <div class="panel">
+          <h2 id="gameover-title">게임 오버</h2>
+          <p class="final">점수 <strong id="final-score">0</strong></p>
+          <p id="new-record" class="badge" hidden>🎉 신기록!</p>
+          <p class="sub">최고 점수 <span id="final-best">0</span> · 최고 과일 <span id="final-fruit">-</span></p>
+
+          <form id="submit-form" autocomplete="off">
+            <label for="input-nickname">닉네임</label>
+            <div class="row">
+              <input id="input-nickname" type="text" maxlength="12" placeholder="닉네임 (최대 12자)" enterkeyhint="send">
+              <button id="btn-submit" class="btn primary" type="submit">랭킹 등록</button>
+            </div>
+          </form>
+          <p id="submit-status" role="status" aria-live="polite"></p>
+
+          <h3>🏆 랭킹</h3>
+          <p id="ranking-status" role="status" aria-live="polite"></p>
+          <ol id="ranking-list" class="ranking"></ol>
+
+          <button id="btn-restart" class="btn primary" type="button">다시 하기</button>
+        </div>
+      </section>
+
+      <section id="screen-ranking" class="overlay" aria-labelledby="ranking-title" hidden>
+        <div class="panel">
+          <h2 id="ranking-title">🏆 랭킹</h2>
+          <p id="ranking-view-status" role="status" aria-live="polite"></p>
+          <ol id="ranking-view-list" class="ranking"></ol>
+          <button id="btn-close-ranking" class="btn" type="button">닫기</button>
+        </div>
+      </section>
+    </main>
+
+    <footer id="evolution" aria-label="과일 진화 순서">
+      <ol id="evolution-list"></ol>
+    </footer>
+  </div>
+
+  <noscript>이 게임은 JavaScript가 필요합니다.</noscript>
+
+  <!-- 물리 엔진: 버전 고정. 클래식 스크립트가 모듈보다 먼저 실행되어 전역 Matter 가 준비된다. -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+  <script type="module" src="./js/main.js"></script>
+</body>
+</html>
