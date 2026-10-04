@@ -1,0 +1,615 @@
+/* 수박 합치기 — 모바일 우선, 따뜻한 크림 테마.
+   레이아웃 핵심: #stage(게임판)는 폭과 남은 화면 높이를 모두 만족하는 2:3 상자다.
+   HUD/진화 줄 높이를 변수로 고정해 두고 그만큼을 뺀 높이로 폭을 계산한다. */
+
+:root {
+  color-scheme: light;
+
+  --bg: #fff4d6;
+  --ink: #5d4037;
+  --ink-soft: #8d6e63;
+  --accent: #ff7043;
+  --accent-dark: #d84315;
+  --card: #fffdf6;
+  --line: #f0cf94;
+  --focus: #2962ff;
+  --danger: #c62828;
+  --radius-board: 16px;
+
+  --pad: 8px;
+  --gap: 8px;
+  --hud-h: 68px;
+  --evo-h: 36px;
+  --safe-t: env(safe-area-inset-top, 0px);
+  --safe-r: env(safe-area-inset-right, 0px);
+  --safe-b: env(safe-area-inset-bottom, 0px);
+  --safe-l: env(safe-area-inset-left, 0px);
+
+  --view-h: 100vh;
+  --avail-h: max(200px, calc(var(--view-h) - var(--hud-h) - var(--evo-h) - 2 * var(--gap) - 2 * var(--pad) - var(--safe-t) - var(--safe-b)));
+  --stage-w: min(100%, calc(var(--avail-h) * 2 / 3));
+  /* HUD/진화 줄 폭: 게임판과 같게, 단 너무 좁아지면 300px 로 */
+  --ui-w: max(var(--stage-w), min(100%, 300px));
+
+  --font: ui-rounded, "Apple SD Gothic Neo", "Noto Sans KR", "Malgun Gothic", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-emoji: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif;
+}
+
+@supports (height: 100dvh) {
+  :root { --view-h: 100dvh; }
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+/* 오버레이가 display:flex 라서 hidden 속성이 무시되는 것을 막는다 */
+[hidden] { display: none !important; }
+
+html {
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+body {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  font-family: var(--font);
+  font-size: 16px;
+  line-height: 1.4;
+  color: var(--ink);
+  background:
+    radial-gradient(120% 60% at 50% 0%, #fffaf0 0%, rgba(255, 250, 240, 0) 70%),
+    linear-gradient(#fff4d6, #ffe9b8);
+  background-attachment: fixed;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior: none;
+  touch-action: manipulation;
+}
+
+button, input {
+  margin: 0;
+  font: inherit;
+  color: inherit;
+}
+
+button { cursor: pointer; -webkit-appearance: none; appearance: none; }
+
+:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+noscript {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  text-align: center;
+  font-weight: 700;
+  background: var(--bg);
+}
+
+/* ---------- 레이아웃 ---------- */
+
+#app {
+  width: 100%;
+  max-width: 480px;
+  margin: 0 auto;
+  height: 100vh;
+  height: 100dvh;
+  padding:
+    calc(var(--pad) + var(--safe-t))
+    calc(var(--pad) + var(--safe-r))
+    calc(var(--pad) + var(--safe-b))
+    calc(var(--pad) + var(--safe-l));
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--gap);
+}
+
+/* ---------- HUD ---------- */
+
+#hud {
+  flex: none;
+  width: var(--ui-w);
+  height: var(--hud-h);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 10px;
+  background: rgba(255, 255, 255, 0.62);
+  border-radius: 20px;
+  box-shadow: 0 2px 0 rgba(224, 185, 121, 0.6);
+}
+
+.hud-block {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  line-height: 1;
+}
+
+.hud-block:first-child { flex-grow: 1.4; }
+
+.hud-label {
+  margin-bottom: 3px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--ink-soft);
+}
+
+#score, #best {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 숫자 줄 높이를 같게 둬서 '점수'/'최고' 라벨의 세로 위치가 맞는다 */
+#score, #best { line-height: 30px; }
+#score { font-size: clamp(20px, 6.4vw, 28px); color: var(--accent-dark); }
+#best { font-size: clamp(16px, 5vw, 22px); color: var(--ink); }
+
+.hud-next {
+  flex: none;
+  align-items: center;
+}
+
+.hud-next .hud-label { margin-bottom: 2px; }
+
+#next-canvas {
+  display: block;
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 50% 40%, #ffffff 0%, #fff3d2 100%);
+  box-shadow: 0 0 0 2px var(--line);
+}
+
+.icon-btn {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  padding: 0;
+  font-size: 22px;
+  line-height: 1;
+  background: #ffffff;
+  border: 2px solid var(--line);
+  border-radius: 50%;
+  transition: transform 0.1s ease, background-color 0.15s ease;
+}
+
+.icon-btn:active { transform: scale(0.92); }
+.icon-btn[aria-pressed="true"] { background: #ffe0b2; }
+
+/* ---------- 게임판 ---------- */
+
+#stage {
+  position: relative;
+  flex: none;
+  width: var(--stage-w);
+  aspect-ratio: 2 / 3;
+  overflow: hidden;
+  isolation: isolate;
+  background: #fff6dd;
+  border-radius: var(--radius-board);
+  box-shadow: 0 8px 20px rgba(140, 90, 20, 0.22);
+}
+
+@supports not (aspect-ratio: 2 / 3) {
+  #stage::before {
+    content: "";
+    display: block;
+    padding-top: 150%;
+  }
+}
+
+#game-canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: var(--radius-board);
+  touch-action: none;
+}
+
+#clear-banner {
+  position: absolute;
+  left: 50%;
+  top: 36%;
+  z-index: 4;
+  max-width: 92%;
+  padding: 10px 22px;
+  font-size: clamp(24px, 8vw, 38px);
+  font-weight: 900;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  text-align: center;
+  color: #ffffff;
+  text-shadow: 0 2px 0 rgba(27, 94, 32, 0.6);
+  background: linear-gradient(180deg, #66bb6a, #2e7d32);
+  border: 3px solid #ffffff;
+  border-radius: 999px;
+  box-shadow: 0 6px 0 #1b5e20, 0 12px 24px rgba(27, 94, 32, 0.35);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  animation: clear-pop 1.8s cubic-bezier(0.2, 0.9, 0.3, 1.2) both;
+}
+
+@keyframes clear-pop {
+  0%   { opacity: 0; transform: translate(-50%, -50%) scale(0.3) rotate(-6deg); }
+  14%  { opacity: 1; transform: translate(-50%, -50%) scale(1.18) rotate(2deg); }
+  24%  { transform: translate(-50%, -50%) scale(1) rotate(0deg); }
+  78%  { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  100% { opacity: 0; transform: translate(-50%, -62%) scale(1.04); }
+}
+
+/* ---------- 오버레이 / 패널 ---------- */
+
+.overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  background: rgba(255, 244, 214, 0.72);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+}
+
+/* 게임오버 패널에는 10행짜리 랭킹이 있어 내부 스크롤이 필요하다 */
+.panel {
+  width: 100%;
+  max-height: 100%;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+  padding: 18px 16px 16px;
+  text-align: center;
+  color: var(--ink);
+  background: var(--card);
+  border: 2px solid var(--line);
+  border-radius: 22px;
+  box-shadow: 0 10px 30px rgba(120, 70, 10, 0.25);
+  animation: panel-in 0.22s ease-out both;
+  /* 한글은 글자 단위가 아니라 어절 단위로 줄바꿈한다 */
+  word-break: keep-all;
+  overflow-wrap: anywhere;
+}
+
+.panel > :first-child { margin-top: 0; }
+.panel > :last-child { margin-bottom: 0; }
+
+@keyframes panel-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.97); }
+  to   { opacity: 1; transform: none; }
+}
+
+.panel h1 { margin: 0 0 8px; font-size: clamp(22px, 7vw, 30px); line-height: 1.2; }
+.panel h2 { margin: 0 0 6px; font-size: clamp(20px, 6.4vw, 26px); line-height: 1.2; }
+.panel h3 { margin: 16px 0 6px; font-size: 17px; }
+/* :where 로 특이도를 0 으로 둬서 .final/.sub/.badge 등 개별 규칙이 이기게 한다 */
+:where(.panel) p { margin: 8px 0; font-size: 14px; }
+
+.how-to {
+  margin: 12px 0 14px;
+  padding: 10px 12px 10px 28px;
+  text-align: left;
+  font-size: 14px;
+  line-height: 1.5;
+  background: #fff3d1;
+  border-radius: 14px;
+}
+
+.how-to li + li { margin-top: 4px; }
+
+.final {
+  margin: 6px 0 0;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--ink-soft);
+}
+
+.final strong {
+  display: block;
+  font-size: clamp(40px, 13vw, 56px);
+  line-height: 1.05;
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+}
+
+.sub { color: var(--ink-soft); font-size: 13px; }
+
+.badge {
+  display: inline-block;
+  margin: 6px 0 0;
+  padding: 4px 12px;
+  font-size: 14px;
+  font-weight: 800;
+  color: var(--ink);
+  background: #ffe082;
+  border-radius: 999px;
+}
+
+.error {
+  padding: 8px 12px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--danger);
+  background: #ffebee;
+  border-radius: 12px;
+}
+
+.ok, .success {
+  padding: 8px 12px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #2e7d32;
+  background: #e8f5e9;
+  border-radius: 12px;
+}
+
+/* 상태 문구 자리. 비어 있으면 공간을 차지하지 않지만 aria-live 영역으로는 남는다 */
+#submit-status, #ranking-status, #ranking-view-status {
+  margin: 6px 0;
+  min-height: 1.3em;
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+
+#submit-status:empty, #ranking-status:empty, #ranking-view-status:empty {
+  margin: 0;
+  min-height: 0;
+}
+
+/* ---------- 버튼 ---------- */
+
+.btn {
+  --edge: #e0b979;
+  min-height: 44px;
+  padding: 0 18px;
+  font-size: 16px;
+  font-weight: 800;
+  line-height: 1.2;
+  white-space: nowrap;
+  color: var(--ink);
+  background: #ffffff;
+  border: 2px solid var(--edge);
+  border-radius: 999px;
+  box-shadow: 0 3px 0 var(--edge);
+  transition: transform 0.08s ease, filter 0.15s ease;
+}
+
+.btn.primary {
+  --edge: var(--accent-dark);
+  color: #ffffff;
+  text-shadow: 0 1px 0 rgba(120, 30, 0, 0.35);
+  background: linear-gradient(180deg, #ff8a50, #ff6a2b);
+}
+
+.btn:active { transform: translateY(2px); }
+
+.btn:disabled,
+.btn[aria-disabled="true"] {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+}
+
+@media (hover: hover) {
+  .btn:not(:disabled):hover { filter: brightness(1.05); }
+}
+
+.btn-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
+}
+
+.btn-row .btn { flex: 1 1 130px; }
+
+/* 긴 패널을 스크롤해도 닫기/다시 하기 버튼은 항상 보이게.
+   sticky 의 bottom 은 패널 패딩을 뺀 콘텐츠 상자 기준이라 bottom:0 이면 스크롤 끝의 자연스러운 위치와 같다.
+   버튼 아래 패딩 띠로 목록이 비쳐 보이지 않도록 카드색 그림자를 아래로 길게 깐다. */
+#btn-restart,
+#btn-close-ranking {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  display: block;
+  width: 100%;
+  margin-top: 14px;
+  box-shadow: 0 3px 0 var(--edge), 0 0 0 10px var(--card), 0 24px 0 10px var(--card);
+}
+
+/* ---------- 닉네임 폼 ---------- */
+
+#submit-form {
+  margin: 12px 0 0;
+  text-align: left;
+}
+
+#submit-form label {
+  display: block;
+  margin: 0 0 4px 2px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ink-soft);
+}
+
+form .row {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+
+form .row input {
+  flex: 1;
+  min-width: 0;
+  height: 44px;
+  padding: 0 12px;
+  font-size: 16px; /* 16px 미만이면 iOS 가 입력 시 화면을 확대한다 */
+  color: var(--ink);
+  background: #ffffff;
+  border: 2px solid var(--line);
+  border-radius: 12px;
+  -webkit-user-select: text;
+  user-select: text;
+  -webkit-touch-callout: default;
+}
+
+form .row input:focus-visible {
+  border-color: var(--accent);
+  outline-offset: 0;
+}
+
+form .row .btn { flex: none; }
+
+/* ---------- 랭킹 ---------- */
+
+.ranking {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  text-align: left;
+}
+
+/* li 의 자식은 [순위, 이름, 점수] 순서의 3개. 클래스가 아니라 위치로 스타일한다 */
+.ranking > li {
+  display: grid;
+  grid-template-columns: 2.4em minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 8px;
+  min-height: 32px;
+  margin: 0 0 4px;
+  padding: 5px 10px;
+  font-size: 14px;
+  background: rgba(255, 244, 214, 0.6);
+  border-radius: 12px;
+}
+
+.ranking > li > :nth-child(1) {
+  font-weight: 900;
+  text-align: center;
+  color: var(--ink-soft);
+}
+
+.ranking > li > :nth-child(2) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ranking > li > :nth-child(3) {
+  font-weight: 800;
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.ranking > li:nth-child(-n+3) { font-weight: 700; }
+.ranking > li:nth-child(1) { background: linear-gradient(90deg, #fff1b8, #ffe082); }
+.ranking > li:nth-child(2) { background: linear-gradient(90deg, #f3f5f8, #dfe3ea); }
+.ranking > li:nth-child(3) { background: linear-gradient(90deg, #ffe6d3, #ffcba4); }
+.ranking > li:nth-child(1) > :nth-child(1) { color: #b8860b; }
+.ranking > li:nth-child(2) > :nth-child(1) { color: #607d8b; }
+.ranking > li:nth-child(3) > :nth-child(1) { color: #a1583a; }
+
+.ranking > li.me { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+/* ---------- 진화 순서 ---------- */
+
+#evolution {
+  flex: none;
+  width: var(--ui-w);
+  height: var(--evo-h);
+}
+
+#evolution-list {
+  --unit: clamp(2.6px, 1vw, 3.6px);
+  height: 100%;
+  margin: 0;
+  padding: 0 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  overflow: hidden;
+  white-space: nowrap;
+  list-style: none;
+  font-family: var(--font-emoji);
+  background: rgba(255, 255, 255, 0.62);
+  border-radius: 999px;
+}
+
+/* 레벨이 오를수록 커지게. 마크업(클래스/속성)에 의존하지 않도록 순서로 지정한다.
+   320px 폭에서도 한 줄에 들어가도록 단위를 뷰포트 폭에 맞춰 줄인다 */
+#evolution-list > li {
+  flex: 0 1 auto;
+  min-width: 0;
+  line-height: 1;
+  font-size: calc((3.4 + var(--i, 0) * 0.4) * var(--unit));
+}
+
+#evolution-list > li:nth-child(1)  { --i: 0; }
+#evolution-list > li:nth-child(2)  { --i: 1; }
+#evolution-list > li:nth-child(3)  { --i: 2; }
+#evolution-list > li:nth-child(4)  { --i: 3; }
+#evolution-list > li:nth-child(5)  { --i: 4; }
+#evolution-list > li:nth-child(6)  { --i: 5; }
+#evolution-list > li:nth-child(7)  { --i: 6; }
+#evolution-list > li:nth-child(8)  { --i: 7; }
+#evolution-list > li:nth-child(9)  { --i: 8; }
+#evolution-list > li:nth-child(10) { --i: 9; }
+#evolution-list > li:nth-child(11) { --i: 10; }
+
+/* ---------- 좁은 화면 ---------- */
+
+/* 320px 급: 입력창과 버튼을 한 줄에 두면 플레이스홀더가 잘려서 두 줄로 쌓는다 */
+@media (max-width: 359px) {
+  form .row { flex-wrap: wrap; }
+  form .row input { flex: 1 1 100%; }
+  form .row .btn { flex: 1 1 100%; }
+}
+
+/* ---------- 낮은 화면 ---------- */
+
+@media (max-height: 600px) {
+  .panel { padding: 12px; }
+  .panel h1 { font-size: 22px; }
+  .how-to { margin: 8px 0 10px; font-size: 13px; }
+  .final strong { font-size: 40px; }
+}
+
+/* ---------- 모션 최소화 ---------- */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}
