@@ -44,6 +44,9 @@ export const PHYSICS = {
 };
 
 // Apps Script 웹 앱 배포 URL(…/exec). 빈 문자열이면 오프라인 모드(랭킹 비활성).
+// 게임 전체를 Apps Script 웹 앱 하나로 배포한 경우(gas/Index.html)에는 이 값이 필요 없다: 그 화면 안에서는
+// google.script.run 으로 같은 스크립트의 랭킹 함수를 직접 부르고, js/api.js 는 google.script.run 이 있으면 이 URL 을 쓰지 않는다.
+// GitHub Pages 처럼 화면을 따로 호스팅할 때만 여기에 …/exec 주소를 넣는다.
 export const API_URL = '';
 
 export const NICKNAME_MAX = 12;

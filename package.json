@@ -7,12 +7,17 @@
     "serve": "python3 -m http.server 8000",
     "test": "node --test",
     "e2e:install": "playwright-core install chromium",
-    "test:e2e": "node tests/e2e/smoke.mjs"
+    "test:e2e": "node tests/e2e/smoke.mjs && node tests/e2e/gas.mjs",
+    "test:e2e:smoke": "node tests/e2e/smoke.mjs",
+    "test:e2e:gas": "node tests/e2e/gas.mjs",
+    "build:gas": "node scripts/build-gas.mjs",
+    "check:gas": "node scripts/build-gas.mjs --check"
   },
   "engines": {
     "node": ">=20"
   },
   "devDependencies": {
+    "esbuild": "0.28.2",
     "matter-js": "0.19.0",
     "playwright-core": "1.56.1"
   }

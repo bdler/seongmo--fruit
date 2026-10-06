@@ -1,0 +1,4 @@
+# gas/Index.html 는 생성물이며 바이트 단위로 비교하는 최신성 검사가 있다. 윈도우 autocrlf 로 줄바꿈이 바뀌면 검사가 실패하므로 LF 로 고정한다.
+gas/Index.html text eol=lf
+gas/Code.gs text eol=lf
+gas/appsscript.json text eol=lf

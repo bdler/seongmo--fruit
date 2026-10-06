@@ -1,13 +1,22 @@
 /**
- * 수박 합치기 — 랭킹 백엔드 (Google Apps Script 웹 앱, 스프레드시트에 바인딩된 스크립트)
+ * 수박 합치기 — Google Apps Script 웹 앱 하나로 게임 화면과 랭킹 서버를 함께 제공한다.
+ * (스프레드시트에 바인딩된 스크립트. 파일은 Code.gs, Index.html, appsscript.json 세 개)
  *
- *   GET  ?action=ranking&limit=10  -> { ok: true, data: [{ nickname, score, maxLevel, at }] }
- *   POST text/plain JSON 본문       -> { ok: true } | { ok: false, error: '<코드>' }
+ *   GET  (action 없음)               -> 게임 화면 (Index.html). 웹 앱 주소를 그냥 열면 이것이 나온다.
+ *   GET  ?action=ranking&limit=10    -> { ok: true, data: [{ nickname, score, maxLevel, at }] }   (외부 클라이언트용 JSON)
+ *   POST text/plain JSON 본문         -> { ok: true } | { ok: false, error: '<코드>' }              (외부 클라이언트용 JSON)
+ *   google.script.run.apiRanking(limit) / apiSubmit(payload)
+ *                                    -> 위 JSON 과 똑같은 결과 객체. 게임 화면이 실제로 쓰는 통로다 (CORS/리다이렉트 없음).
  *
  * 에러 코드: bad_request, invalid_nickname, invalid_score, implausible, throttled, server_busy
  * (서버 내부 오류는 상세를 숨기고 server_busy 로 응답한다. 원인은 실행 로그에만 남는다.)
  *
  * 처음 한 번: 편집기에서 setup() 을 실행한 뒤 웹 앱으로 배포한다.
+ *
+ * [보안 메모] 이름이 밑줄(_)로 끝나지 않는 최상위 함수는 모두 게임 화면의 google.script.run 으로
+ * 방문자(익명 포함)가 직접 호출할 수 있다. 현재 그 목록은 doGet, doPost, setup, apiRanking, apiSubmit 뿐이며
+ * 전부 익명 호출에 안전해야 한다 (검증은 모두 서버에서 하고, setup 은 멱등이며 데이터를 지우지 않는다).
+ * 새 함수는 밑줄로 끝나게 만든다. tests/gas.test.mjs 가 이 목록이 늘어나면 실패한다.
  */
 
 const SHEET_NAME = 'scores';
@@ -41,6 +50,17 @@ const THROTTLE_SEC = 10;
 const THROTTLE_KEY_PREFIX = 'thr:';
 const LOCK_WAIT_MS = 5000;
 
+// 게임 화면: 같은 프로젝트의 HTML 파일 Index (Index.html). 확장자 없이 이름만 쓴다.
+const PAGE_FILE = 'Index';
+const PAGE_TITLE = '수박 합치기';
+// 화면은 Apps Script 가 감싸는 iframe 안에서 열리므로 viewport 는 HTML 안이 아니라 서버에서 넣어야 적용된다.
+const PAGE_VIEWPORT = 'width=device-width, initial-scale=1, viewport-fit=cover';
+const PAGE_MISSING_MESSAGE =
+  '게임 화면 파일(Index.html)을 불러오지 못했습니다.\n' +
+  'Apps Script 편집기 왼쪽 파일 목록에서 + → HTML 을 눌러 이름을 Index 로 만들고(.html 은 자동으로 붙습니다), ' +
+  '배포 파일 gas/Index.html 의 내용을 통째로 붙여 넣은 뒤 저장하세요.\n' +
+  '그다음 배포 → 배포 관리 → 연필(편집) → 버전: 새 버전 → 배포 로 같은 주소를 다시 배포하면 됩니다.';
+
 const RANKING_CACHE_KEY = 'ranking';
 const RANKING_CACHE_SEC = 60;
 const RANKING_KEEP = 50;
@@ -60,33 +80,93 @@ const FORMULA_START_RE = /^[=+\-@\t\r]/;
 function doGet(e) {
   try {
     const p = (e && e.parameter) || {};
-    const action = p.action == null || p.action === '' ? 'ranking' : String(p.action);
-    if (action !== 'ranking') return json_({ ok: false, error: 'bad_request' });
-    return json_({ ok: true, data: getRanking_().slice(0, parseLimit_(p.limit)) });
+    // action 이 없거나 빈 문자열이면 게임 화면. action 이 있으면 (화면이 아닌 외부 클라이언트를 위한) JSON API 이다.
+    if (p.action == null || p.action === '') return page_();
+    if (String(p.action) !== 'ranking') return json_(fail_('bad_request'));
+    return json_(rankingResult_(p.limit));
   } catch (err) {
     return internalError_(err);
   }
 }
 
 function doPost(e) {
-  let body;
   try {
-    const raw = e && e.postData && e.postData.contents;
-    if (typeof raw !== 'string' || !raw || raw.length > MAX_BODY_CHARS) {
-      return json_({ ok: false, error: 'bad_request' });
-    }
-    body = JSON.parse(raw);
-  } catch (err) {
-    return json_({ ok: false, error: 'bad_request' });
-  }
-  try {
-    return json_(submitScore_(body));
+    return json_(submitRaw_(e && e.postData && e.postData.contents));
   } catch (err) {
     return internalError_(err);
   }
 }
 
+// ── google.script.run 으로 부르는 공개 함수 ───────────────
+// 이름이 밑줄(_)로 끝나면 google.script.run 이 부를 수 없다. 게임 화면이 불러야 하므로 이 둘은 일부러 밑줄이 없다.
+// 결과는 doGet/doPost 의 JSON 과 같은 { ok, ... } 객체이고 절대 throw 하지 않는다 (실패는 { ok: false, error }).
+// 검증, 빈도 제한, 재전송 판별, 락, 캐시는 HTTP 경로와 같은 코드를 쓴다.
+
+function apiRanking(limit) {
+  try {
+    return rankingResult_(limit);
+  } catch (err) {
+    return internalErrorResult_(err);
+  }
+}
+
+function apiSubmit(payload) {
+  try {
+    // doPost 가 받는 JSON 본문과 똑같은 모양/크기로 맞춰서 같은 길로 보낸다 (undefined, 함수, Date 등은 JSON 이 걸러낸다).
+    let raw = null;
+    try {
+      raw = JSON.stringify(payload);
+    } catch (err) {
+      raw = null; // 순환 참조, BigInt 등
+    }
+    return submitRaw_(raw);
+  } catch (err) {
+    return internalErrorResult_(err);
+  }
+}
+
+// ── 게임 화면 ────────────────────────────────────────
+
+// Index 파일은 템플릿이 아니라 그대로 내보낸다 (createTemplateFromFile/스크립틀릿 <? ?> 을 쓰지 않는다).
+// 파일이 없거나 읽을 수 없으면 스택 트레이스 없이 무엇을 해야 하는지만 알려 준다.
+function page_() {
+  try {
+    return HtmlService.createHtmlOutputFromFile(PAGE_FILE).setTitle(PAGE_TITLE).addMetaTag('viewport', PAGE_VIEWPORT);
+  } catch (err) {
+    console.error(String((err && err.stack) || err));
+    return ContentService.createTextOutput(PAGE_MISSING_MESSAGE);
+  }
+}
+
 // ── 점수 제출 ────────────────────────────────────────
+
+// 요청 본문(JSON 문자열)을 검사하고 점수를 제출한다. doPost 와 apiSubmit 이 함께 쓴다.
+function submitRaw_(raw) {
+  let body;
+  try {
+    if (typeof raw !== 'string' || !raw || raw.length > MAX_BODY_CHARS) return fail_('bad_request');
+    body = JSON.parse(raw);
+  } catch (err) {
+    return fail_('bad_request');
+  }
+  return submitResult_(body);
+}
+
+function submitResult_(body) {
+  try {
+    return submitScore_(body);
+  } catch (err) {
+    return internalErrorResult_(err);
+  }
+}
+
+function rankingResult_(limit) {
+  try {
+    return { ok: true, data: getRanking_().slice(0, parseLimit_(limit)) };
+  } catch (err) {
+    return internalErrorResult_(err);
+  }
+}
 
 function submitScore_(b) {
   if (!b || typeof b !== 'object' || Array.isArray(b)) return fail_('bad_request');
@@ -124,6 +204,9 @@ function submitScore_(b) {
     if (clientId && cacheGet_(THROTTLE_KEY_PREFIX + clientId)) return fail_('throttled');
     ensureNicknameText_(sheet);
     sheet.appendRow([new Date(), nickname, score, maxLevel, playTimeMs, drops, clientId]);
+    // 락을 풀기 전에 대기 중인 쓰기를 확정한다 (Lock 공식 문서의 권장). 이게 없으면 락을 이어받은 다른 실행(타임아웃 뒤 재시도 등)이
+    // 방금 쓴 줄을 못 보고 isResubmission_ 이 놓치거나, 아래에서 비운 랭킹 캐시를 낡은 시트로 다시 채울 수 있다.
+    SpreadsheetApp.flush();
     if (clientId) cachePut_(THROTTLE_KEY_PREFIX + clientId, '1', THROTTLE_SEC);
     cacheRemove_(RANKING_CACHE_KEY);
   } finally {
@@ -252,7 +335,8 @@ function rankingNickname_(v) {
 }
 
 function parseLimit_(raw) {
-  if (raw == null || raw === '') return DEFAULT_LIMIT;
+  if (typeof raw !== 'number' && typeof raw !== 'string') return DEFAULT_LIMIT; // google.script.run 은 아무 값이나 넘길 수 있다
+  if (raw === '') return DEFAULT_LIMIT;
   const n = Number(raw);
   if (isNaN(n)) return DEFAULT_LIMIT;
   return Math.min(Math.max(Math.floor(n), 1), RANKING_KEEP);
@@ -289,8 +373,9 @@ function setup() {
   console.log('SHEET_ID 저장 완료: ' + ss.getId() + ' (시트 "' + SHEET_NAME + '" 준비됨)');
   console.log(
     '다음 단계: (1) 배포 → 새 배포 → 유형 "웹 앱", 실행 사용자 "나", 액세스 "모든 사용자" ' +
-      '(2) 발급된 …/exec URL 을 js/config.js 의 API_URL 에 입력 ' +
-      '(3) 코드를 고친 뒤에는 배포 관리 → 편집 → 새 버전으로 같은 URL 을 유지'
+      '(2) 발급된 …/exec 주소를 열면 게임이 나온다 (이 주소만 알려 주면 된다) ' +
+      '(3) 코드나 Index.html 을 고친 뒤에는 배포 관리 → 편집 → 새 버전으로 같은 주소를 유지 ' +
+      '(js/config.js 의 API_URL 은 게임 화면을 GitHub Pages 처럼 다른 곳에 올릴 때만 필요하다)'
   );
 }
 
@@ -313,9 +398,13 @@ function fail_(error) {
 }
 
 // 응답에는 상세를 싣지 않고 실행 로그에만 남긴다.
-function internalError_(err) {
+function internalErrorResult_(err) {
   console.error(String((err && err.stack) || err));
-  return json_({ ok: false, error: 'server_busy' });
+  return fail_('server_busy');
+}
+
+function internalError_(err) {
+  return json_(internalErrorResult_(err));
 }
 
 // 정수만 허용한다. 숫자 또는 숫자 문자열만 받고 true/null/[] 같은 값은 Number() 변환에 기대지 않고 거른다.

@@ -9,7 +9,6 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { chromium } from 'playwright-core';
 import {
   FRUITS,
   LAST_LEVEL,
@@ -20,10 +19,19 @@ import {
   scoreOf,
 } from '../../js/config.js';
 
+import {
+  launchBrowser, sleep, until,
+  bodiesOf, stateOf, scoreOfPage, advance, pause, spawn, gameInfo, text, isVisible, lsGet,
+  inBox, settleChecked, layoutMetrics, assertLayout,
+} from './harness.mjs';
+
+export { launchBrowser };
+
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const MATTER_FILE = path.join(ROOT, 'node_modules/matter-js/build/matter.min.js');
 const CDN_MATTER = 'https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js';
 const FAKE_API_URL = 'https://script.google.com/macros/s/TEST/exec';
+const OFFLINE_PENDING = { nickname: '보관', score: 77, maxLevel: 3, playTimeMs: 20000, drops: 12, clientId: 'abcdefghijklmnop1234' };
 const FAKE_API_RE = /^https:\/\/script\.google\.com\/macros\/s\/TEST\/exec(\?.*)?$/;
 const API_URL_LINE_RE = /^export const API_URL = .*;$/m;
 const CLIENT_ID_RE = /^[A-Za-z0-9_-]{16,64}$/;
@@ -76,23 +84,6 @@ export async function startServer() {
       server.closeAllConnections?.();
     }),
   };
-}
-
-export async function launchBrowser() {
-  const headless = !process.argv.includes('--headed');
-  const executablePath = process.env.CHROMIUM_PATH || undefined;
-  return chromium.launch({ headless, executablePath });
-}
-
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-// 조건이 참이 될 때까지 기다린다 (Node 쪽 상태를 기다릴 때 쓴다)
-async function until(fn, what, timeoutMs = 5000) {
-  const t0 = Date.now();
-  while (!fn()) {
-    if (Date.now() - t0 > timeoutMs) assert.fail(`시간 안에 ${what} 이(가) 일어나지 않음`);
-    await sleep(25);
-  }
 }
 
 // 가짜 Apps Script. GET ranking / POST submit 프로토콜을 흉내 내고 요청을 기록한다.
@@ -224,20 +215,6 @@ export async function loadGame(env, search = '?debug') {
 
 // ───────────────────────── 시나리오 도우미 ─────────────────────────
 
-const bodiesOf = (page) => page.evaluate(() => window.__fruit.bodies());
-const stateOf = (page) => page.evaluate(() => window.__fruit.getState());
-const scoreOfPage = (page) => page.evaluate(() => window.__fruit.getScore());
-const advance = (page, ms) => page.evaluate((n) => window.__fruit.advance(n), ms);
-const pause = (page) => page.evaluate(() => window.__fruit.pause());
-const spawn = (page, level, x, y) => page.evaluate(([l, px, py]) => window.__fruit.spawn(l, px, py), [level, x, y]);
-const gameInfo = (page) => page.evaluate(() => {
-  const g = window.__fruit.game;
-  return { state: g.state, score: g.score, drops: g.drops, maxLevel: g.maxLevel, cleared: g.cleared, danger: g.danger };
-});
-const text = (page, sel) => page.locator(sel).innerText();
-const isVisible = (page, sel) => page.locator(sel).isVisible();
-const lsGet = (page, key) => page.evaluate((k) => localStorage.getItem(k), key);
-
 async function startGame(page) {
   await page.click('#btn-start');
   await page.waitForFunction(() => window.__fruit.getState() === 'READY');
@@ -271,19 +248,6 @@ function pinAboveLine(page, level = 3, x = 200) {
   }, [level, x]);
 }
 
-const inBox = (b, tol = 4) => {
-  const r = FRUITS[b.level].radius;
-  return b.x >= r - tol && b.x <= WORLD.width - r + tol && b.y <= WORLD.height - r + tol && Number.isFinite(b.x + b.y);
-};
-
-// advance 를 쪼개 진행하면서 모든 스텝에서 상자 안에 있는지 확인한다
-async function settleChecked(page, totalMs, chunk = 100) {
-  for (let t = 0; t < totalMs; t += chunk) {
-    await advance(page, chunk);
-    for (const b of await bodiesOf(page)) assert.ok(inBox(b), `상자를 벗어남: ${JSON.stringify(b)}`);
-  }
-}
-
 // physics 가 보고하는 합치기 이벤트를 기록한다 (game.applyMerge 를 감싼다)
 function recordMerges(page) {
   return page.evaluate(() => {
@@ -299,56 +263,6 @@ function recordMerges(page) {
 const mergesOf = (page) => page.evaluate(() => window.__merges);
 
 const massOf = (bodies) => bodies.reduce((s, b) => s + 2 ** b.level, 0);
-
-async function layoutMetrics(page) {
-  return page.evaluate(() => {
-    const rect = (sel) => {
-      const b = document.querySelector(sel).getBoundingClientRect();
-      return { l: b.left, t: b.top, r: b.right, b: b.bottom, w: b.width, h: b.height };
-    };
-    const de = document.documentElement;
-    const canvas = document.getElementById('game-canvas');
-    const lis = [...document.querySelectorAll('#evolution-list > li')].map((li) => {
-      const b = li.getBoundingClientRect();
-      return { l: b.left, r: b.right, cy: (b.top + b.bottom) / 2, w: b.width };
-    });
-    const evo = document.getElementById('evolution-list');
-    return {
-      vw: innerWidth, vh: innerHeight, dpr: devicePixelRatio,
-      canvas: rect('#game-canvas'), stage: rect('#stage'), hud: rect('#hud'), evo: rect('#evolution'),
-      mute: rect('#btn-mute'), next: rect('#next-canvas'),
-      canvasPx: { w: canvas.width, h: canvas.height },
-      scroll: { x: scrollX, y: scrollY, dw: de.scrollWidth, dh: de.scrollHeight, bw: document.body.scrollWidth, bh: document.body.scrollHeight },
-      evoOverflow: evo.scrollWidth > evo.clientWidth + 1,
-      lis,
-    };
-  });
-}
-
-// opts.minCanvasW: 게임판 최소 폭. opts.sideBySide: 가로 모드(HUD/진화 줄이 게임판 옆에 있어야 함)
-function assertLayout(m, label, { minCanvasW = 200, sideBySide = false } = {}) {
-  const eps = 0.75;
-  const within = (name, r) => {
-    assert.ok(r.l >= -eps && r.t >= -eps && r.r <= m.vw + eps && r.b <= m.vh + eps, `${label}: ${name} 이(가) 화면 밖 ${JSON.stringify(r)} / ${m.vw}x${m.vh}`);
-  };
-  for (const name of ['canvas', 'stage', 'hud', 'evo', 'mute', 'next']) within(name, m[name]);
-  assert.ok(Math.abs(m.canvas.w / m.canvas.h - 2 / 3) < 0.01, `${label}: 캔버스 비율 2:3 아님 (${m.canvas.w}x${m.canvas.h})`);
-  assert.ok(m.canvas.w > minCanvasW, `${label}: 캔버스가 너무 작음 ${m.canvas.w}`);
-  if (sideBySide) {
-    assert.ok(m.hud.l >= m.stage.r - eps && m.evo.l >= m.stage.r - eps, `${label}: HUD/진화 줄이 게임판과 겹침`);
-  }
-  const wantW = m.canvas.w * Math.min(m.dpr, 3);
-  assert.ok(Math.abs(m.canvasPx.w - wantW) <= 1.5, `${label}: 캔버스 백킹 해상도 ${m.canvasPx.w} != css*dpr ${wantW}`);
-  assert.ok(m.scroll.dw <= m.vw && m.scroll.dh <= m.vh && m.scroll.bw <= m.vw && m.scroll.bh <= m.vh, `${label}: 페이지가 스크롤됨 ${JSON.stringify(m.scroll)}`);
-  assert.equal(m.scroll.x + m.scroll.y, 0, `${label}: 스크롤 위치가 0 이 아님`);
-  assert.equal(m.lis.length, FRUITS.length, `${label}: 진화 줄 항목 수`);
-  assert.ok(!m.evoOverflow, `${label}: 진화 줄이 넘침`);
-  for (let i = 0; i < m.lis.length; i++) {
-    assert.ok(Math.abs(m.lis[i].cy - m.lis[0].cy) < 8, `${label}: 진화 줄이 줄바꿈됨 (li ${i})`);
-    if (i) assert.ok(m.lis[i].l >= m.lis[i - 1].r - 0.5, `${label}: 진화 줄 항목이 겹침 (li ${i})`);
-  }
-  assert.ok(m.lis[m.lis.length - 1].r <= m.evo.r + 0.5 && m.lis[0].l >= m.evo.l - 0.5, `${label}: 진화 항목이 줄 밖으로 나감`);
-}
 
 // ───────────────────────── 시나리오 ─────────────────────────
 
@@ -766,6 +680,17 @@ scenario('g', '오프라인(API_URL 없음): 제출 폼 숨김, 안내 문구, �
   });
   assert.deepEqual(external.map((r) => r.url), [], '외부 호출이 있으면 안 됨');
   assert.ok(!env.requests.some((r) => /google/.test(r.url)));
+});
+
+scenario('g2', '오프라인 부팅(API_URL 없음): 보관된 점수는 보내지도 지우지도 않고 그대로 둔다', {
+  storage: { [STORAGE_KEYS.pending]: JSON.stringify(OFFLINE_PENDING) },
+}, async (env) => {
+  const { page } = env;
+  await loadGame(env);
+  assert.equal(await page.evaluate(() => import('./js/config.js').then((m) => m.API_URL)), '');
+  // 부팅 때의 재전송 판단은 비동기이므로, 지워진다면 지워질 시간을 충분히 준다
+  await page.waitForTimeout(500);
+  assert.deepEqual(JSON.parse(await lsGet(page, STORAGE_KEYS.pending)), OFFLINE_PENDING, '전송 통로가 없다는 이유로 보관된 점수를 지우면 안 된다');
 });
 
 scenario('h', 'API 모드: 랭킹 렌더(textContent), 제출(text/plain), 성공/실패/재시도', {
@@ -1315,13 +1240,18 @@ function sampleDangerGlow(page, durationMs = 700, everyMs = 35) {
     const g = canvas.getContext('2d');
     const k = canvas.width / 400;
     const out = [];
-    const t0 = performance.now();
+    let t0 = 0;
     const tick = () => {
       out.push(g.getImageData(Math.round(wx * k), Math.round(wy * k), 1, 1).data[1]);
       if (performance.now() - t0 < total) setTimeout(tick, step);
       else resolve(out);
     };
-    tick();
+    // 시뮬레이션을 advance/전환한 직후에는 캔버스가 아직 새로 그려지지 않았을 수 있다(그림은 rAF 에서 그린다).
+    // 두 프레임을 기다린 뒤에 읽어야 이전 그림(경고 없음)이 첫 표본으로 잡히지 않는다.
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      t0 = performance.now();
+      tick();
+    }));
   }), [durationMs, everyMs, WORLD.dangerY - 6, 20]);
 }
 

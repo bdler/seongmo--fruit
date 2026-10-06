@@ -1,190 +1,33 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import vm from 'node:vm';
 
 import { scoreOf, WATERMELON_PAIR_BONUS, LAST_LEVEL, MAX_DROP_LEVEL, TIMING } from '../js/config.js';
+import { HEADER, SHEET_ID, loadGas, publicFunctions, createScriptRun } from './helpers/gas-env.mjs';
 
 const SOURCE = readFileSync(new URL('../gas/Code.gs', import.meta.url), 'utf8');
 const MANIFEST = JSON.parse(readFileSync(new URL('../gas/appsscript.json', import.meta.url), 'utf8'));
 
-const HEADER = ['timestamp', 'nickname', 'score', 'maxLevel', 'playTimeMs', 'drops', 'clientId'];
-const SHEET_ID = 'sheet-id-0001';
 const CID = 'abcdefghijklmnop1234';
+// 주석을 뺀 Code.gs (소스 수준 점검에서 주석에 적힌 단어가 걸리지 않도록)
+const CODE_ONLY = SOURCE.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+// vm(Code.gs) 의 객체는 realm 이 달라 deepStrictEqual 이 prototype 불일치로 실패하므로 JSON 을 한 번 거쳐 비교한다.
+const plain = (v) => JSON.parse(JSON.stringify(v));
+const INDEX_HTML = '<!doctype html><html><head><title>x</title></head><body><canvas id="c"></canvas><script>/* game */</script></body></html>';
 
-// ── Apps Script 서비스 모의 객체 ──────────────────────────
-
-function createSheet(rows) {
-  const sheet = {
-    rows,
-    frozenRows: 0,
-    numberFormats: [],
-    reads: 0,
-    getLastRow: () => sheet.rows.length,
-    getRange(row, col, numRows, numCols) {
-      // A1 표기('B:B')는 서식 지정에만 쓴다
-      if (typeof row === 'string') {
-        return {
-          setNumberFormat(f) {
-            if (sheet.formatError) throw sheet.formatError;
-            sheet.numberFormats.push([row, f]);
-          },
-        };
-      }
-      return {
-        // 화면에 보이는 문자열. 날짜/불리언 셀은 sheet.displayOf(값) 로 흉내 낸다 (기본은 String(값)).
-        getDisplayValues() {
-          return this.getValues().map((line) => line.map((v) => (sheet.displayOf ? sheet.displayOf(v) : String(v))));
-        },
-        getValues() {
-          sheet.reads++;
-          const out = [];
-          for (let r = 0; r < numRows; r++) {
-            const line = sheet.rows[row - 1 + r] || [];
-            out.push(Array.from({ length: numCols }, (_, c) => (line[col - 1 + c] === undefined ? '' : line[col - 1 + c])));
-          }
-          return out;
-        },
-        setValues(values) {
-          for (let r = 0; r < numRows; r++) {
-            const line = sheet.rows[row - 1 + r] || (sheet.rows[row - 1 + r] = []);
-            for (let c = 0; c < numCols; c++) line[col - 1 + c] = values[r][c];
-          }
-        },
-      };
-    },
-    appendRow(values) {
-      if (sheet.appendError) throw sheet.appendError;
-      sheet.rows.push(Array.from(values));
-    },
-    insertRowBefore: (n) => void sheet.rows.splice(n - 1, 0, []),
-    setFrozenRows: (n) => void (sheet.frozenRows = n),
-  };
-  return sheet;
+// Apps Script 서비스 모의 객체와 vm 로더는 tests/helpers/gas-env.mjs 에 있다.
+// 아래 env 는 loadGas() 의 mocks 에 gas 를 붙인 것이다 (기본으로 Index 파일이 있다).
+function createEnv(options = {}) {
+  const { gas, mocks } = loadGas({ files: { Index: INDEX_HTML }, ...options });
+  mocks.gas = gas;
+  return mocks;
 }
 
-// 스크립트가 쓰는 전역 서비스를 직접 만든 모의 객체로 대체해 Code.gs 를 vm 에 올린다.
-function createEnv({ rows, hasSheet = true, sheetId = SHEET_ID } = {}) {
-  const env = {
-    now: Date.UTC(2026, 0, 1),
-    props: new Map(sheetId ? [['SHEET_ID', sheetId]] : []),
-    cache: new Map(),
-    cachePuts: [],
-    cacheRemoves: [],
-    lockWaits: [],
-    lockHeld: false,
-    lockFails: false,
-    releases: 0,
-    logs: [],
-    errors: [],
-    openedIds: [],
-    sheet: hasSheet ? createSheet(rows || [HEADER]) : null,
-    activeSpreadsheet: null,
-  };
-
-  const spreadsheet = {
-    getId: () => SHEET_ID,
-    getSheetByName: (name) => (name === 'scores' ? env.sheet : null),
-    insertSheet(name) {
-      assert.equal(name, 'scores');
-      env.sheet = createSheet([]);
-      return env.sheet;
-    },
-  };
-  env.spreadsheet = spreadsheet;
-
-  class FakeDate extends Date {
-    constructor(...args) {
-      if (args.length) super(...args);
-      else super(env.now);
-    }
-    static now() {
-      return env.now;
-    }
-  }
-
-  const sandbox = {
-    Date: FakeDate,
-    console: {
-      log: (...a) => void env.logs.push(a.join(' ')),
-      error: (...a) => void env.errors.push(a.join(' ')),
-    },
-    PropertiesService: {
-      getScriptProperties: () => ({
-        getProperty: (k) => (env.props.has(k) ? env.props.get(k) : null),
-        setProperty: (k, v) => void env.props.set(k, String(v)),
-      }),
-    },
-    SpreadsheetApp: {
-      openById(id) {
-        env.openedIds.push(id);
-        if (id !== SHEET_ID) throw new Error('Unexpected error: Requested entity was not found. (id=' + id + ')');
-        return spreadsheet;
-      },
-      getActiveSpreadsheet: () => env.activeSpreadsheet,
-    },
-    LockService: {
-      getScriptLock: () => ({
-        tryLock(ms) {
-          env.lockWaits.push(ms);
-          if (env.lockFails) return false;
-          env.lockHeld = true;
-          return true;
-        },
-        releaseLock() {
-          env.releases++;
-          env.lockHeld = false;
-        },
-      }),
-    },
-    CacheService: {
-      getScriptCache: () => ({
-        get(k) {
-          const hit = env.cache.get(k);
-          if (!hit) return null;
-          if (env.now >= hit.expiresAt) {
-            env.cache.delete(k);
-            return null;
-          }
-          return hit.value;
-        },
-        put(k, v, sec) {
-          env.cachePuts.push({ key: k, sec });
-          env.cache.set(k, { value: v, expiresAt: env.now + sec * 1000 });
-        },
-        remove(k) {
-          env.cacheRemoves.push(k);
-          env.cache.delete(k);
-        },
-      }),
-    },
-    ContentService: {
-      MimeType: { JSON: 'JSON' },
-      createTextOutput: (text) => ({
-        text,
-        mime: null,
-        setMimeType(m) {
-          this.mime = m;
-          return this;
-        },
-        getContent() {
-          return this.text;
-        },
-      }),
-    },
-  };
-
-  // 최상위 const 는 vm 컨텍스트의 속성이 되지 않으므로 마지막 표현식으로 함께 돌려받는다.
-  const code = `${SOURCE}
-;({ doGet, doPost, setup, submitScore_, sanitizeNickname_, isPlausible_, getRanking_,
-    consts: { MAX_SCORE, MAX_SCORE_PER_DROP, MIN_MS_PER_DROP, RANKING_KEEP, RANKING_CACHE_SEC, THROTTLE_SEC, MAX_NICKNAME } });`;
-  env.gas = vm.runInContext(code, vm.createContext(sandbox), { filename: 'Code.gs' });
-  return env;
-}
 
 // 응답은 문자열로 받아 이쪽 realm 의 JSON.parse 로 풀어야 deepStrictEqual 이 prototype 불일치로 실패하지 않는다.
 const parse = (out) => JSON.parse(out.getContent());
-const get = (env, params) => parse(env.gas.doGet({ parameter: params }));
+// params 에 action 이 없으면 랭킹 JSON 을 부른다 (action 이 없는 GET 은 이제 게임 화면이다)
+const get = (env, params) => parse(env.gas.doGet({ parameter: { action: 'ranking', ...params } }));
 const post = (env, body) =>
   parse(env.gas.doPost({ postData: { type: 'text/plain', contents: typeof body === 'string' ? body : JSON.stringify(body) } }));
 
@@ -215,7 +58,7 @@ test('랭킹: 점수 내림차순, 같으면 먼저 기록한 쪽이 위, 응답
 
 test('랭킹: 응답은 JSON MIME 타입이다', () => {
   const env = createEnv();
-  assert.equal(env.gas.doGet({ parameter: {} }).mime, 'JSON');
+  assert.equal(env.gas.doGet({ parameter: { action: 'ranking' } }).mime, 'JSON');
   assert.equal(env.gas.doPost({ postData: { contents: '{' } }).mime, 'JSON');
 });
 
@@ -318,19 +161,129 @@ test('랭킹: 시트 오류는 내부 정보 없이 server_busy 로 응답한다
     createEnv({ sheetId: null }), // setup() 미실행
     createEnv({ sheetId: 'wrong-id' }), // openById 가 예외
   ]) {
-    const out = env.gas.doGet({ parameter: {} });
+    const out = env.gas.doGet({ parameter: { action: 'ranking' } });
     assert.deepEqual(parse(out), { ok: false, error: 'server_busy' });
     assert.doesNotMatch(out.getContent(), /Error|stack|setup|SHEET_ID|wrong-id|\bat\b/);
     assert.equal(env.errors.length, 1, '원인은 실행 로그에 남는다');
   }
 });
 
-test('GET: 알 수 없는 action 은 bad_request, e 가 비어도 동작한다', () => {
+test('GET: 알 수 없는 action 은 bad_request (화면이 아니라 JSON)', () => {
   const env = createEnv({ rows: [HEADER, row(1, 'a', 1)] });
   assert.deepEqual(get(env, { action: 'delete' }), { ok: false, error: 'bad_request' });
   assert.deepEqual(get(env, { action: 'Ranking' }), { ok: false, error: 'bad_request' });
-  assert.equal(parse(env.gas.doGet(undefined)).ok, true);
-  assert.equal(parse(env.gas.doGet({})).ok, true);
+  assert.deepEqual(get(env, { action: 'page' }), { ok: false, error: 'bad_request' });
+  assert.deepEqual(get(env, { action: ' ' }), { ok: false, error: 'bad_request' }, '공백만 있는 action 은 빈 값이 아니다');
+  assert.deepEqual(get(env, { action: 0 }), { ok: false, error: 'bad_request' });
+  assert.deepEqual(get(env, { action: false }), { ok: false, error: 'bad_request' });
+  assert.deepEqual(env.html.requested, [], 'API 요청은 화면 파일을 읽지 않는다');
+});
+
+// ── 게임 화면 (action 이 없는 GET) ─────────────────────────
+
+const PAGE_REQUESTS = [
+  ['e 가 undefined', undefined],
+  ['빈 e', {}],
+  ['빈 parameter', { parameter: {} }],
+  ['parameter 가 null', { parameter: null }],
+  ['action 이 빈 문자열', { parameter: { action: '' } }],
+  ['action 이 undefined', { parameter: { action: undefined } }],
+  ['action 이 null', { parameter: { action: null } }],
+  ['action 없이 다른 값만 (예: 공유 링크에 붙은 쿼리)', { parameter: { limit: '5', utm_source: 'x' } }],
+];
+
+test('화면: action 이 없거나 비어 있으면 Index 를 제목/viewport 와 함께 내보낸다', () => {
+  for (const [name, e] of PAGE_REQUESTS) {
+    const env = createEnv({ rows: [HEADER, row(1000, 'a', 10)] });
+    const out = env.gas.doGet(e);
+    assert.equal(out.getContent(), INDEX_HTML, name);
+    assert.equal(out.getTitle(), '수박 합치기', name);
+    assert.deepEqual(
+      out.getMetaTags().map((t) => [t.name, t.content]),
+      [['viewport', 'width=device-width, initial-scale=1, viewport-fit=cover']],
+      name
+    );
+    assert.deepEqual(env.html.requested, ['Index'], '확장자 없이 Index 로 요청한다');
+    // 화면 자체는 시트/캐시/락을 건드리지 않는다 (랭킹은 화면이 뜬 뒤 google.script.run 으로 따로 부른다)
+    assert.equal(env.sheet.reads, 0, name);
+    assert.deepEqual([env.lockWaits, env.cachePuts, env.openedIds], [[], [], []], name);
+  }
+});
+
+test('화면: 서버의 viewport 는 개발용 index.html 의 viewport 와 같다 (래퍼 iframe 때문에 서버에서 넣는다)', () => {
+  const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  const devViewport = /<meta name="viewport" content="([^"]*)"/.exec(html)?.[1];
+  assert.ok(devViewport, 'index.html 에 viewport 메타가 있어야 함');
+  assert.equal(createEnv().gas.consts.PAGE_VIEWPORT, devViewport);
+  assert.equal(createEnv().gas.consts.PAGE_FILE, 'Index');
+});
+
+test('화면: Index 는 템플릿으로 평가하지 않고 내용 그대로 내보낸다 (스크립틀릿/</script> 가 있어도)', () => {
+  const tricky = '<!doctype html><script>const s = "</script>"; if (a <? b) {}</script><?= 1 + 1 ?><?!= danger() ?><? throw 1 ?>';
+  const env = createEnv({ files: { Index: tricky } });
+  assert.equal(env.gas.doGet({ parameter: {} }).getContent(), tricky);
+  // 소스 수준 점검: 템플릿/평가 API 를 쓰지 않는다 (주석은 제외)
+  assert.doesNotMatch(CODE_ONLY, /createTemplate|\.evaluate\(|HtmlService\.createHtmlOutput\(|\.append\(/);
+  assert.match(CODE_ONLY, /HtmlService\.createHtmlOutputFromFile\(PAGE_FILE\)/);
+});
+
+test('화면: Index 파일이 없으면 던지지 않고 스택 없는 한국어 안내를 돌려준다', () => {
+  const env = createEnv({ files: {} });
+  for (const [name, e] of PAGE_REQUESTS) {
+    let out;
+    assert.doesNotThrow(() => (out = env.gas.doGet(e)), name);
+    const text = out.getContent();
+    assert.match(text, /Index\.html/, name);
+    assert.match(text, /배포/, name);
+    assert.equal(out.mime, null, '평문 텍스트로 나간다 (JSON 이 아님)');
+    assert.doesNotMatch(text, /Unknown file|Error|stack|Code\.gs|\bat\b|\.gs:\d/, `내부 정보를 싣지 않는다: ${text}`);
+  }
+  assert.equal(env.errors.length, PAGE_REQUESTS.length, '원인은 실행 로그에만 남는다');
+  assert.match(env.errors[0], /Unknown file/);
+  assert.equal(env.sheet.reads, 0);
+});
+
+test('화면: 파일 이름은 정확히 Index 여야 한다 (소문자나 확장자 포함 요청은 없는 파일)', () => {
+  assert.match(createEnv({ files: { index: INDEX_HTML } }).gas.doGet({ parameter: {} }).getContent(), /Index\.html/);
+  // 로더는 'Index.html' 키를 'Index' 로 정규화한다 (편집기에서 파일이 Index.html 로 보이는 것과 같다)
+  assert.equal(createEnv({ files: { 'Index.html': INDEX_HTML } }).gas.doGet({ parameter: {} }).getContent(), INDEX_HTML);
+});
+
+test('화면: HtmlService 가 다른 이유로 실패해도 같은 안내를 돌려주고 원인은 로그에만 남는다', () => {
+  const env = createEnv();
+  env.html.files = {
+    has: () => true,
+    get() {
+      throw new Error('boom internal detail');
+    },
+  };
+  const out = env.gas.doGet({ parameter: {} });
+  assert.match(out.getContent(), /Index\.html/);
+  assert.doesNotMatch(out.getContent(), /boom/);
+  assert.match(env.errors.join('\n'), /boom internal detail/);
+});
+
+test('화면: 시트가 아직 준비되지 않아도 화면은 열린다 (랭킹과 별개)', () => {
+  for (const env of [createEnv({ sheetId: null }), createEnv({ hasSheet: false })]) {
+    assert.equal(env.gas.doGet({ parameter: {} }).getContent(), INDEX_HTML);
+    assert.deepEqual(env.errors, []);
+  }
+});
+
+test('GET: action=ranking 은 화면 파일을 읽지 않고 JSON(JSON MIME)으로 답한다', () => {
+  const env = createEnv({ rows: [HEADER, row(1000, 'a', 10)] });
+  const out = env.gas.doGet({ parameter: { action: 'ranking', limit: '5' } });
+  assert.equal(out.mime, 'JSON');
+  assert.deepEqual(parse(out), { ok: true, data: [{ nickname: 'a', score: 10, maxLevel: 3, at: 1000 }] });
+  assert.deepEqual(env.html.requested, []);
+});
+
+test('POST: 화면을 내보내지 않는다 (본문이 없어도 JSON bad_request)', () => {
+  const env = createEnv();
+  const out = env.gas.doPost(undefined);
+  assert.equal(out.mime, 'JSON');
+  assert.deepEqual(parse(out), { ok: false, error: 'bad_request' });
+  assert.deepEqual(env.html.requested, []);
 });
 
 // ── 점수 제출: 정상 경로 ─────────────────────────────────
@@ -382,59 +335,60 @@ test('제출: 제출한 점수가 getRanking 정렬에서 같은 점수의 기�
 
 // ── 점수 제출: 잘못된 입력 ───────────────────────────────
 
-test('제출: 잘못된 입력은 코드별로 거부하고 시트/락을 건드리지 않는다', () => {
-  const MAX = 100000;
-  const cases = [
-    // 닉네임
-    ['닉네임 없음', { nickname: undefined }, 'invalid_nickname'],
-    ['닉네임 빈 문자열', { nickname: '' }, 'invalid_nickname'],
-    ['닉네임 공백뿐', { nickname: '   \t ' }, 'invalid_nickname'],
-    ['닉네임 제어문자뿐', { nickname: '\u0000\u0007\u001f\u007f' }, 'invalid_nickname'],
-    ['닉네임 제로폭/RTL 문자뿐', { nickname: '\u200b\u200d\u202e\ufeff' }, 'invalid_nickname'],
-    ['닉네임 한글 채움 문자뿐', { nickname: '\u3164\u3164' }, 'invalid_nickname'],
-    ['닉네임 null', { nickname: null }, 'invalid_nickname'],
-    ['닉네임 숫자', { nickname: 123 }, 'invalid_nickname'],
-    ['닉네임 객체', { nickname: { a: 1 } }, 'invalid_nickname'],
-    ['닉네임 배열', { nickname: ['a'] }, 'invalid_nickname'],
-    // 점수
-    ['점수 없음', { score: undefined }, 'invalid_score'],
-    ['점수 null (NaN/Infinity 의 JSON 표현)', { score: null }, 'invalid_score'],
-    ['점수 음수', { score: -1 }, 'invalid_score'],
-    ['점수 소수', { score: 1.5 }, 'invalid_score'],
-    ['점수 문자열', { score: 'abc' }, 'invalid_score'],
-    ['점수 숫자+문자', { score: '12abc' }, 'invalid_score'],
-    ['점수 빈 문자열', { score: '' }, 'invalid_score'],
-    ['점수 불리언', { score: true }, 'invalid_score'],
-    ['점수 배열', { score: [5] }, 'invalid_score'],
-    ['점수 상한 초과', { score: MAX + 1 }, 'invalid_score'],
-    ['점수 지수 표기', { score: '1e3' }, 'invalid_score'],
-    // 그 밖의 필드
-    ['maxLevel 없음', { maxLevel: undefined }, 'bad_request'],
-    ['maxLevel 음수', { maxLevel: -1 }, 'bad_request'],
-    ['maxLevel 11', { maxLevel: 11 }, 'bad_request'],
-    ['maxLevel 소수', { maxLevel: 2.5 }, 'bad_request'],
-    ['maxLevel 문자열', { maxLevel: 'x' }, 'bad_request'],
-    ['drops 없음', { drops: undefined }, 'bad_request'],
-    ['drops 0', { drops: 0 }, 'bad_request'],
-    ['drops 5001', { drops: 5001 }, 'bad_request'],
-    ['drops 소수', { drops: 1.5 }, 'bad_request'],
-    ['playTimeMs 없음', { playTimeMs: undefined }, 'bad_request'],
-    ['playTimeMs 0', { playTimeMs: 0 }, 'bad_request'],
-    ['playTimeMs 음수', { playTimeMs: -5 }, 'bad_request'],
-    ['playTimeMs 24시간 초과', { playTimeMs: 86400001 }, 'bad_request'],
-    ['playTimeMs 소수', { playTimeMs: 1000.5 }, 'bad_request'],
-    ['clientId 너무 짧음', { clientId: 'short' }, 'bad_request'],
-    ['clientId 너무 김', { clientId: 'a'.repeat(65) }, 'bad_request'],
-    ['clientId 허용되지 않는 문자', { clientId: 'abcdefghijklmnop 123!' }, 'bad_request'],
-    ['clientId 빈 문자열', { clientId: '' }, 'bad_request'],
-    ['clientId 숫자', { clientId: 12345678901234567890 }, 'bad_request'],
-    // 타당성
-    ['점수가 드롭 수 대비 과도', { drops: 10, playTimeMs: 90000, score: 1201 }, 'implausible'],
-    ['플레이 시간이 드롭 수 대비 과도하게 짧음', { drops: 10, playTimeMs: 3599, score: 100 }, 'implausible'],
-  ];
+const MAX = 100000;
+// [이름, valid() 에 덮어쓸 값, 기대하는 에러 코드]. HTTP 경로(doPost)와 google.script.run 경로(apiSubmit)가 같은 표를 쓴다.
+const INVALID_SUBMISSIONS = [
+  // 닉네임
+  ['닉네임 없음', { nickname: undefined }, 'invalid_nickname'],
+  ['닉네임 빈 문자열', { nickname: '' }, 'invalid_nickname'],
+  ['닉네임 공백뿐', { nickname: '   \t ' }, 'invalid_nickname'],
+  ['닉네임 제어문자뿐', { nickname: '\u0000\u0007\u001f\u007f' }, 'invalid_nickname'],
+  ['닉네임 제로폭/RTL 문자뿐', { nickname: '\u200b\u200d\u202e\ufeff' }, 'invalid_nickname'],
+  ['닉네임 한글 채움 문자뿐', { nickname: '\u3164\u3164' }, 'invalid_nickname'],
+  ['닉네임 null', { nickname: null }, 'invalid_nickname'],
+  ['닉네임 숫자', { nickname: 123 }, 'invalid_nickname'],
+  ['닉네임 객체', { nickname: { a: 1 } }, 'invalid_nickname'],
+  ['닉네임 배열', { nickname: ['a'] }, 'invalid_nickname'],
+  // 점수
+  ['점수 없음', { score: undefined }, 'invalid_score'],
+  ['점수 null (NaN/Infinity 의 JSON 표현)', { score: null }, 'invalid_score'],
+  ['점수 음수', { score: -1 }, 'invalid_score'],
+  ['점수 소수', { score: 1.5 }, 'invalid_score'],
+  ['점수 문자열', { score: 'abc' }, 'invalid_score'],
+  ['점수 숫자+문자', { score: '12abc' }, 'invalid_score'],
+  ['점수 빈 문자열', { score: '' }, 'invalid_score'],
+  ['점수 불리언', { score: true }, 'invalid_score'],
+  ['점수 배열', { score: [5] }, 'invalid_score'],
+  ['점수 상한 초과', { score: MAX + 1 }, 'invalid_score'],
+  ['점수 지수 표기', { score: '1e3' }, 'invalid_score'],
+  // 그 밖의 필드
+  ['maxLevel 없음', { maxLevel: undefined }, 'bad_request'],
+  ['maxLevel 음수', { maxLevel: -1 }, 'bad_request'],
+  ['maxLevel 11', { maxLevel: 11 }, 'bad_request'],
+  ['maxLevel 소수', { maxLevel: 2.5 }, 'bad_request'],
+  ['maxLevel 문자열', { maxLevel: 'x' }, 'bad_request'],
+  ['drops 없음', { drops: undefined }, 'bad_request'],
+  ['drops 0', { drops: 0 }, 'bad_request'],
+  ['drops 5001', { drops: 5001 }, 'bad_request'],
+  ['drops 소수', { drops: 1.5 }, 'bad_request'],
+  ['playTimeMs 없음', { playTimeMs: undefined }, 'bad_request'],
+  ['playTimeMs 0', { playTimeMs: 0 }, 'bad_request'],
+  ['playTimeMs 음수', { playTimeMs: -5 }, 'bad_request'],
+  ['playTimeMs 24시간 초과', { playTimeMs: 86400001 }, 'bad_request'],
+  ['playTimeMs 소수', { playTimeMs: 1000.5 }, 'bad_request'],
+  ['clientId 너무 짧음', { clientId: 'short' }, 'bad_request'],
+  ['clientId 너무 김', { clientId: 'a'.repeat(65) }, 'bad_request'],
+  ['clientId 허용되지 않는 문자', { clientId: 'abcdefghijklmnop 123!' }, 'bad_request'],
+  ['clientId 빈 문자열', { clientId: '' }, 'bad_request'],
+  ['clientId 숫자', { clientId: 12345678901234567890 }, 'bad_request'],
+  // 타당성
+  ['점수가 드롭 수 대비 과도', { drops: 10, playTimeMs: 90000, score: 1201 }, 'implausible'],
+  ['플레이 시간이 드롭 수 대비 과도하게 짧음', { drops: 10, playTimeMs: 3599, score: 100 }, 'implausible'],
+];
 
+test('제출: 잘못된 입력은 코드별로 거부하고 시트/락을 건드리지 않는다', () => {
   const env = createEnv();
-  for (const [name, patch, error] of cases) {
+  for (const [name, patch, error] of INVALID_SUBMISSIONS) {
     const body = valid(patch);
     for (const k of Object.keys(patch)) if (patch[k] === undefined) delete body[k];
     assert.deepEqual(post(env, body), { ok: false, error }, name);
@@ -809,6 +763,73 @@ test('시트 쓰기 중 예외가 나도 락을 풀고 내부 정보 없이 serv
   assert.deepEqual(post(env, valid()), { ok: true });
 });
 
+// ── 쓰기 확정: 락을 풀기 전에 SpreadsheetApp.flush() ─────────────
+// 공식 Lock 문서는 스프레드시트를 다루는 락 안에서 releaseLock() 전에 flush 로 대기 중인 변경을 확정하라고 한다.
+// 확정 전에 락을 풀면 락을 이어받은 다른 실행(타임아웃 뒤 재시도 등)이 방금 쓴 줄을 못 본다. 실제 플랫폼의 확정 시점은 확인하지 못한 가정이라
+// 모의(deferCommit)는 문서가 말하는 최악의 경우(flush 나 실행 종료 전까지 다른 실행에게 안 보임)를 흉내 낸다.
+
+test('제출: 락을 풀기 전에 flush 로 쓰기를 확정한다 (appendRow -> flush -> 캐시 -> releaseLock)', () => {
+  const env = createEnv();
+  assert.deepEqual(post(env, valid()), { ok: true });
+  assert.deepEqual(env.events, ['tryLock', 'appendRow', 'flush', `cachePut:thr:${CID}`, 'cacheRemove:ranking', 'releaseLock']);
+  assert.equal(env.flushes, 1);
+  // 거절/재전송/빈도 제한으로 쓰지 않은 요청은 flush 도 하지 않는다
+  assert.deepEqual(post(env, valid()), { ok: true });
+  assert.deepEqual(post(env, valid({ score: 322 })), { ok: false, error: 'throttled' });
+  assert.deepEqual(post(env, valid({ score: -1 })), { ok: false, error: 'invalid_score' });
+  assert.equal(env.flushes, 1);
+});
+
+// 첫 실행 A 가 락을 풀자마자 (A 가 끝나기 전에) 같은 판의 재시도 B 와 랭킹 조회 C 가 들어오는 상황.
+function overlapAtRelease({ source } = {}) {
+  const env = createEnv({ deferCommit: true, source });
+  const seen = {};
+  env.onReleaseLock = () => {
+    env.onReleaseLock = null;
+    seen.retry = env.runAs('retry', () => plain(env.gas.apiSubmit(valid())));
+    seen.viewer = env.runAs('viewer', () => plain(env.gas.apiRanking(10)));
+  };
+  seen.first = plain(env.gas.apiSubmit(valid()));
+  env.endExecution(); // A 가 끝난다: flush 하지 않았다면 이제서야 쓰기가 확정된다
+  seen.rows = env.sheet.rows.length - 1;
+  seen.rankingLater = plain(env.gas.apiRanking(10));
+  return seen;
+}
+
+test('제출: 락을 이어받은 재시도는 방금 쓴 줄을 보고 성공으로 답하며, 같은 순간의 랭킹 조회도 새 줄을 본다', () => {
+  const seen = overlapAtRelease();
+  assert.deepEqual(seen.first, { ok: true });
+  assert.deepEqual(seen.retry, { ok: true }, "저장됐는데 '너무 자주' 라는 거짓 오류가 나오면 안 된다");
+  assert.equal(seen.rows, 1, '재시도가 줄을 늘리면 안 된다');
+  assert.deepEqual(seen.viewer.data.map((r) => r.nickname), ['수박왕'], '낡은 시트로 랭킹 캐시를 다시 채우면 안 된다');
+  assert.deepEqual(seen.rankingLater.data.map((r) => r.nickname), ['수박왕']);
+});
+
+test('제출: (모의 점검) flush 를 빼면 위 상황이 실제로 거짓 throttled 와 낡은 랭킹 캐시로 드러난다', () => {
+  const source = SOURCE.replace('SpreadsheetApp.flush();', '');
+  assert.notEqual(source, SOURCE, '전제: Code.gs 에 flush 호출이 있다');
+  const seen = overlapAtRelease({ source });
+  assert.deepEqual(seen.retry, { ok: false, error: 'throttled' });
+  assert.equal(seen.rows, 1);
+  assert.deepEqual(seen.viewer.data, []);
+  assert.deepEqual(seen.rankingLater.data, [], '낡은 랭킹이 60초 캐시에 남는다');
+});
+
+test('제출: flush 가 실패해도 락을 풀고 내부 정보 없이 server_busy, 같은 판 재시도는 성공으로 답하고 줄은 하나', () => {
+  const env = createEnv();
+  env.flushError = new Error('Exception: secret flush detail');
+  const out = env.gas.doPost({ postData: { contents: JSON.stringify(valid()) } });
+  assert.deepEqual(parse(out), { ok: false, error: 'server_busy' });
+  assert.doesNotMatch(out.getContent(), /secret|Exception|stack/);
+  assert.equal(env.lockHeld, false);
+  assert.equal(env.releases, 1);
+  assert.match(env.errors[0], /secret flush detail/, '로그에는 남는다');
+
+  env.flushError = null;
+  assert.deepEqual(post(env, valid()), { ok: true }, '이미 쓰인 줄이면 재전송으로 판별한다');
+  assert.equal(env.sheet.rows.length, 2);
+});
+
 test('SHEET_ID 가 없거나 시트가 없으면 제출은 server_busy', () => {
   for (const env of [createEnv({ sheetId: null }), createEnv({ hasSheet: false })]) {
     assert.deepEqual(post(env, valid()), { ok: false, error: 'server_busy' });
@@ -832,7 +853,8 @@ test('setup: SHEET_ID 저장, scores 시트와 7열 헤더 생성, 헤더 고정
   const log = env.logs.join('\n');
   assert.match(log, new RegExp(SHEET_ID));
   assert.match(log, /웹 앱/);
-  assert.match(log, /API_URL/);
+  assert.match(log, /exec 주소를 열면 게임이 나온다/, '주소만 열면 게임이 나온다고 안내한다');
+  assert.match(log, /API_URL.*다른 곳에 올릴 때만/, 'API_URL 은 따로 호스팅할 때만 필요하다고 안내한다');
 
   // 설정 직후 바로 동작한다
   assert.deepEqual(post(env, valid()), { ok: true });
@@ -873,6 +895,300 @@ test('setup: 스프레드시트에 바인딩되지 않았으면 이유를 알려
   env.activeSpreadsheet = null;
   assert.throws(() => env.gas.setup(), /스프레드시트/);
   assert.equal(env.props.has('SHEET_ID'), false);
+});
+
+// ── google.script.run 공개 함수: apiRanking / apiSubmit ───────────
+// 게임 화면은 HTTP 가 아니라 이 두 함수를 부른다. 결과는 doGet/doPost 의 JSON 과 같아야 하고 절대 throw 하면 안 된다.
+
+const apiRanking = (env, ...args) => plain(env.gas.apiRanking(...args));
+const apiSubmit = (env, body) => plain(env.gas.apiSubmit(body));
+
+test('apiRanking: doGet 의 랭킹과 같은 결과와 같은 limit 보정', () => {
+  const rows = [HEADER];
+  for (let i = 0; i < 60; i++) rows.push(row(1000 + i, 'p' + i, 1000 - i));
+  const limits = [undefined, 3, '3', 3.9, '3.9', 0, '0', -5, '-5', 1000, 'Infinity', Infinity, 'abc', '', null, NaN, 50, 51, 1];
+  for (const limit of limits) {
+    const viaHttp = get(createEnv({ rows }), limit === undefined || limit === null ? {} : { limit: String(limit) });
+    const viaApi = apiRanking(createEnv({ rows }), limit);
+    assert.deepEqual(viaApi, viaHttp, `limit=${String(limit)}`);
+  }
+  const res = apiRanking(createEnv({ rows }));
+  assert.deepEqual(Object.keys(res).sort(), ['data', 'ok']);
+  assert.equal(res.data.length, 10);
+  assert.deepEqual(res.data[0], { nickname: 'p0', score: 1000, maxLevel: 3, at: 1000 });
+});
+
+test('apiRanking: 숫자/문자열이 아닌 limit(객체, 배열, 불리언, 심볼, BigInt, 함수)은 기본값 10', () => {
+  const rows = [HEADER];
+  for (let i = 0; i < 20; i++) rows.push(row(1000 + i, 'p' + i, 100 - i));
+  for (const limit of [{}, [], [3], true, false, Symbol('s'), 7n, () => 3, { valueOf: () => 3 }, new Date()]) {
+    const env = createEnv({ rows });
+    let res;
+    assert.doesNotThrow(() => (res = apiRanking(env, limit)), String(typeof limit));
+    assert.equal(res.ok, true);
+    assert.equal(res.data.length, 10);
+  }
+});
+
+test('apiRanking: 시트 오류는 내부 정보 없이 server_busy, 원인은 로그에만', () => {
+  for (const env of [createEnv({ hasSheet: false }), createEnv({ sheetId: null }), createEnv({ sheetId: 'wrong-id' })]) {
+    const res = apiRanking(env, 10);
+    assert.deepEqual(res, { ok: false, error: 'server_busy' });
+    assert.doesNotMatch(JSON.stringify(res), /Error|stack|setup|SHEET_ID|wrong-id/);
+    assert.equal(env.errors.length, 1);
+  }
+});
+
+test('apiRanking/apiSubmit: 캐시를 doGet 과 나눠 쓰고 새 기록이 즉시 반영된다', () => {
+  const env = createEnv({ rows: [HEADER, row(1000, 'old', 100)] });
+  assert.deepEqual(apiRanking(env).data.map((r) => r.nickname), ['old']);
+  get(env, {});
+  apiRanking(env, 3);
+  assert.equal(env.sheet.reads, 1, '캐시 적중 시 시트를 다시 읽지 않는다');
+  assert.deepEqual(env.cachePuts, [{ key: 'ranking', sec: 60 }]);
+
+  assert.deepEqual(apiSubmit(env, valid({ nickname: 'new', score: 900 })), { ok: true });
+  assert.equal(env.cache.has('ranking'), false);
+  assert.deepEqual(apiRanking(env).data.map((r) => r.nickname), ['new', 'old']);
+  assert.deepEqual(get(env, {}).data.map((r) => r.nickname), ['new', 'old']);
+});
+
+test('apiSubmit: 정상 제출은 doPost 와 같은 행, 락, 캐시 처리를 한다', () => {
+  const viaApi = createEnv();
+  const viaHttp = createEnv();
+  assert.deepEqual(apiSubmit(viaApi, valid()), { ok: true });
+  assert.deepEqual(post(viaHttp, valid()), { ok: true });
+  assert.equal(viaApi.sheet.rows.length, 2);
+  assert.deepEqual(plain(viaApi.sheet.rows[1]), plain(viaHttp.sheet.rows[1]));
+  assert.equal(viaApi.sheet.rows[1].length, 7);
+  assert.deepEqual(viaApi.sheet.rows[1].slice(1), ['수박왕', 321, 7, 90000, 80, CID]);
+  for (const key of ['lockWaits', 'releases', 'lockHeld', 'cacheRemoves', 'cachePuts', 'numberFormats']) {
+    assert.deepEqual(viaApi[key] ?? viaApi.sheet[key], viaHttp[key] ?? viaHttp.sheet[key], key);
+  }
+  assert.deepEqual(viaApi.lockWaits, [5000]);
+  assert.deepEqual(viaApi.cachePuts.at(-1), { key: 'thr:' + CID, sec: 10 });
+});
+
+test('apiSubmit: 모든 잘못된 입력이 doPost 와 같은 에러 코드로 거부된다 (undefined 값 포함)', () => {
+  for (const [name, patch, error] of INVALID_SUBMISSIONS) {
+    const viaApi = createEnv();
+    const viaHttp = createEnv();
+    const body = valid(patch); // undefined 로 덮어쓴 키는 그대로 둔다: JSON 이 걸러내는 것까지 HTTP 와 같아야 한다
+    assert.deepEqual(apiSubmit(viaApi, body), { ok: false, error }, name);
+    assert.deepEqual(apiSubmit(viaApi, body), post(viaHttp, body), name);
+    assert.equal(viaApi.sheet.rows.length, 1, name);
+    assert.deepEqual([viaApi.lockWaits, viaApi.cacheRemoves], [[], []], '검증에서 걸러져 락/캐시를 건드리지 않는다');
+  }
+});
+
+test('apiSubmit: 같은 판 재전송, 빈도 제한, 닉네임 정제가 HTTP 경로와 같다', () => {
+  const env = createEnv();
+  assert.deepEqual(apiSubmit(env, valid({ nickname: '=1+1' })), { ok: true });
+  assert.equal(env.sheet.rows[1][1], "'=1+1", '수식 인젝션 방지');
+  env.now += 3000;
+  assert.deepEqual(apiSubmit(env, valid({ nickname: '다른 닉네임' })), { ok: true }, '같은 판의 재전송은 성공으로 답한다');
+  assert.equal(env.sheet.rows.length, 2, '행이 늘지 않는다');
+  assert.deepEqual(apiSubmit(env, valid({ playTimeMs: 90001 })), { ok: false, error: 'throttled' }, '새 판을 10초 안에 또 보내면 제한');
+  env.now += 20000;
+  assert.deepEqual(apiSubmit(env, valid({ playTimeMs: 90001 })), { ok: true });
+  assert.equal(env.sheet.rows.length, 3);
+  assert.equal(env.lockHeld, false);
+  // 며칠 뒤 캐시가 사라져도 시트를 보고 재전송을 가려낸다
+  env.now += 3 * 86400000;
+  env.cache.clear();
+  assert.deepEqual(apiSubmit(env, valid()), { ok: true });
+  assert.equal(env.sheet.rows.length, 3);
+});
+
+test('apiSubmit: HTTP 와 google.script.run 두 통로가 같은 시트/빈도 제한/재전송 판별을 공유한다', () => {
+  const env = createEnv();
+  assert.deepEqual(post(env, valid()), { ok: true });
+  assert.deepEqual(apiSubmit(env, valid()), { ok: true }, 'HTTP 로 저장된 판을 google.script.run 으로 재전송해도 중복되지 않는다');
+  assert.equal(env.sheet.rows.length, 2);
+  assert.deepEqual(apiSubmit(env, valid({ playTimeMs: 90001 })), { ok: false, error: 'throttled' }, '빈도 제한도 clientId 기준으로 공유');
+  env.now += 11000;
+  assert.deepEqual(apiSubmit(env, valid({ playTimeMs: 90001 })), { ok: true });
+  assert.deepEqual(post(env, valid({ playTimeMs: 90001 })), { ok: true }, '반대 방향도 마찬가지');
+  assert.equal(env.sheet.rows.length, 3);
+});
+
+test('apiSubmit: 락 실패와 시트 오류는 server_busy 이고 락을 풀며 내부 정보를 숨긴다', () => {
+  const busy = createEnv({ rows: [HEADER, row(1, 'a', 1)] });
+  apiRanking(busy); // 캐시를 채워 둔다
+  busy.lockFails = true;
+  assert.deepEqual(apiSubmit(busy, valid()), { ok: false, error: 'server_busy' });
+  assert.deepEqual([busy.lockWaits, busy.releases, busy.cacheRemoves], [[5000], 0, []]);
+  assert.equal(busy.sheet.rows.length, 2);
+  busy.lockFails = false;
+  assert.deepEqual(apiSubmit(busy, valid()), { ok: true }, '실패한 제출은 빈도 제한을 소모하지 않는다');
+
+  const broken = createEnv();
+  broken.sheet.appendError = new Error('Exception: secret internal detail');
+  const res = apiSubmit(broken, valid());
+  assert.deepEqual(res, { ok: false, error: 'server_busy' });
+  assert.doesNotMatch(JSON.stringify(res), /secret|Exception|stack/);
+  assert.equal(broken.lockHeld, false);
+  assert.match(broken.errors.join('\n'), /secret internal detail/);
+
+  for (const env of [createEnv({ sheetId: null }), createEnv({ hasSheet: false })]) {
+    assert.deepEqual(apiSubmit(env, valid()), { ok: false, error: 'server_busy' });
+    assert.equal(env.lockHeld, false);
+  }
+});
+
+test('apiSubmit: 이상한 입력(심볼, BigInt, 순환 참조, 던지는 getter/Proxy, 거대한 값)에도 throw 하지 않는다', () => {
+  const circular = valid();
+  circular.self = circular;
+  const throwingGetter = {
+    get nickname() {
+      throw new Error('getter boom');
+    },
+  };
+  const throwingProxy = new Proxy({}, { ownKeys: () => { throw new Error('proxy boom'); }, get: () => { throw new Error('proxy boom'); } });
+  const throwingToJSON = { toJSON() { throw new Error('toJSON boom'); } };
+  const cases = [
+    ['undefined', undefined, 'bad_request'],
+    ['null', null, 'bad_request'],
+    ['숫자', 42, 'bad_request'],
+    ['불리언', true, 'bad_request'],
+    ['빈 문자열', '', 'bad_request'],
+    ['JSON 문자열 (객체가 아님)', JSON.stringify(valid()), 'bad_request'],
+    ['빈 배열', [], 'bad_request'],
+    ['payload 를 감싼 배열', [valid()], 'bad_request'],
+    ['함수', () => valid(), 'bad_request'],
+    ['심볼', Symbol('s'), 'bad_request'],
+    ['BigInt', 10n, 'bad_request'],
+    ['Date', new Date(0), 'bad_request'],
+    ['순환 참조', circular, 'bad_request'],
+    ['던지는 getter', throwingGetter, 'bad_request'],
+    ['던지는 Proxy', throwingProxy, 'bad_request'],
+    ['던지는 toJSON', throwingToJSON, 'bad_request'],
+    ['본문 크기 상한 초과 (닉네임 3000자)', valid({ nickname: '가'.repeat(3000) }), 'bad_request'],
+    ['필드가 하나도 없는 객체', {}, 'invalid_nickname'],
+    ['Map (JSON 으로는 {})', new Map([['nickname', 'x']]), 'invalid_nickname'],
+  ];
+  const env = createEnv();
+  for (const [name, input, error] of cases) {
+    let res;
+    assert.doesNotThrow(() => (res = env.gas.apiSubmit(input)), name);
+    assert.deepEqual(plain(res), { ok: false, error }, name);
+  }
+  // 크기 상한은 doPost 와 같은 결과다
+  assert.deepEqual(post(createEnv(), valid({ nickname: '가'.repeat(3000) })), { ok: false, error: 'bad_request' });
+  assert.equal(env.sheet.rows.length, 1);
+  assert.deepEqual(env.lockWaits, []);
+  assert.deepEqual(env.errors, [], '입력 오류는 서버 오류로 기록하지 않는다');
+});
+
+test('apiRanking/apiSubmit: 결과는 google.script.run 이 돌려줄 수 있는 평범한 값이다 (Date/undefined/함수 없음)', async () => {
+  const env = createEnv({ rows: [HEADER, row(1000, 'a', 5)] });
+  const { run } = createScriptRun(publicFunctions(env.gas));
+  const call = (fn, arg) =>
+    new Promise((resolve) => run.withSuccessHandler((value) => resolve({ ok: true, value })).withFailureHandler((error) => resolve({ ok: false, error }))[fn](arg));
+
+  assert.deepEqual(await call('apiRanking', 5), { ok: true, value: { ok: true, data: [{ nickname: 'a', score: 5, maxLevel: 3, at: 1000 }] } });
+  assert.deepEqual(await call('apiSubmit', valid()), { ok: true, value: { ok: true } });
+  // 에러 결과도 '성공 핸들러'로 온다 (서버 함수가 정상 종료했으므로). 통로 실패와 구분된다.
+  assert.deepEqual(await call('apiSubmit', valid({ score: -1 })), { ok: true, value: { ok: false, error: 'invalid_score' } });
+  assert.deepEqual(await call('apiSubmit', null), { ok: true, value: { ok: false, error: 'bad_request' } });
+  // 밑줄 함수는 google.script.run 으로 부를 수 없다
+  assert.equal(run.submitScore_, undefined);
+  assert.equal(run.sheet_, undefined);
+});
+
+// ── 공개 함수 점검 (이름이 밑줄로 끝나지 않는 최상위 함수는 방문자가 google.script.run 으로 부를 수 있다) ───
+
+const EXPECTED_PUBLIC = ['apiRanking', 'apiSubmit', 'doGet', 'doPost', 'setup'];
+
+test('공개 함수 점검: 밑줄로 끝나지 않는 최상위 함수는 정확히 이 목록뿐이다', () => {
+  const { gas } = loadGas({ files: { Index: INDEX_HTML } });
+  assert.ok(gas.declaredFunctions.includes('submitScore_') && gas.declaredFunctions.includes('page_'), '로더가 함수 선언을 찾아낸다');
+  assert.deepEqual(gas.declaredFunctions.filter((n) => !n.endsWith('_')), EXPECTED_PUBLIC);
+  assert.deepEqual(Object.keys(publicFunctions(gas)), EXPECTED_PUBLIC);
+
+  // 소스 점검: const/let/var 에 담은 함수, 클래스, 전역 대입으로 이름 없는 공개 통로를 만들지 않는다
+  const bound = [...CODE_ONLY.matchAll(/^(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)/gm)];
+  assert.deepEqual(bound.map((m) => m[1]).filter((n) => !n.endsWith('_')), [], '함수를 담은 최상위 변수는 밑줄로 끝나야 한다');
+  assert.doesNotMatch(CODE_ONLY, /^class\s/m);
+  assert.doesNotMatch(CODE_ONLY, /^\s*(?:globalThis|this|self|window)\.\w+\s*=/m);
+});
+
+test('공개 함수 점검: 인자 없이 불러도 안전하고 데이터를 바꾸지 않는다', () => {
+  const rows = [HEADER, row(1000, 'a', 10), row(2000, 'b', 20)];
+  const env = createEnv({ rows });
+  const before = JSON.stringify(env.sheet.rows);
+  const props = JSON.stringify([...env.props]);
+
+  assert.equal(env.gas.doGet().getContent(), INDEX_HTML);
+  assert.deepEqual(parse(env.gas.doPost()), { ok: false, error: 'bad_request' });
+  assert.equal(apiRanking(env).ok, true);
+  assert.deepEqual(plain(env.gas.apiSubmit()), { ok: false, error: 'bad_request' });
+
+  assert.equal(JSON.stringify(env.sheet.rows), before);
+  assert.equal(JSON.stringify([...env.props]), props);
+  assert.deepEqual(env.lockWaits, []);
+  assert.deepEqual(env.errors, []);
+});
+
+test('공개 함수 점검: setup 은 방문자가 몇 번 불러도 멱등이고 데이터를 지우지 않는다', () => {
+  const env = createEnv({ rows: [HEADER, row(1000, 'a', 10), row(2000, 'b', 20)] });
+  env.activeSpreadsheet = env.spreadsheet;
+  const before = JSON.stringify(env.sheet.rows);
+  env.gas.setup();
+  const afterFirst = JSON.stringify([...env.props]);
+  for (let i = 0; i < 3; i++) env.gas.setup();
+  env.gas.setup('x', { a: 1 }, null); // 인자는 무시한다
+  assert.equal(JSON.stringify(env.sheet.rows), before, '시트 데이터는 그대로');
+  assert.equal(JSON.stringify([...env.props]), afterFirst, '스크립트 속성도 그대로');
+  assert.deepEqual([...env.props.keys()].sort(), ['NICKNAME_TEXT_FORMAT', 'SHEET_ID']);
+  assert.deepEqual(env.sheet.numberFormats.every(([range, f]) => range === 'B:B' && f === '@'), true);
+  assert.deepEqual(get(env, {}).data.map((r) => r.nickname), ['b', 'a'], '설정 뒤에도 랭킹이 그대로 나온다');
+  // 소스 점검: 지우거나 비우는 호출이 없다
+  assert.doesNotMatch(CODE_ONLY, /\.(?:clear\w*|delete\w*|remove(?:Sheet|Row|Column)\w*)\(/);
+
+  // 바인딩되지 않은 환경(웹 앱 문맥 등)에서는 아무것도 바꾸지 않고 안내와 함께 실패한다
+  const unbound = createEnv({ sheetId: null });
+  assert.throws(() => unbound.gas.setup(), /스프레드시트/);
+  assert.equal(unbound.props.size, 0);
+  assert.equal(JSON.stringify(unbound.sheet.rows), JSON.stringify([HEADER]));
+});
+
+test('공개 함수 점검: 이상한 인자에도 doGet/doPost/apiRanking/apiSubmit 은 throw 하지 않는다', () => {
+  const circular = {};
+  circular.self = circular;
+  const boom = (msg) => () => {
+    throw new Error(msg);
+  };
+  const weird = [
+    undefined, null, 0, 1, true, '', 'x', [], {}, () => 1, Symbol('s'), 10n, circular, new Date(0),
+    { parameter: 'x' }, { parameter: null }, { parameter: 5 }, { parameter: { action: { toString: boom('toString boom') } } },
+    { parameter: { action: 'ranking', limit: { valueOf: boom('valueOf boom') } } },
+    { postData: 'x' }, { postData: null }, { postData: { contents: {} } }, { postData: { contents: ['{}'] } },
+    { get parameter() { throw new Error('getter boom'); } },
+    { get postData() { throw new Error('getter boom'); } },
+    new Proxy({}, { get: boom('proxy boom'), has: boom('proxy boom'), ownKeys: boom('proxy boom') }),
+  ];
+  const env = createEnv({ rows: [HEADER, row(1000, 'a', 10)] });
+  const before = JSON.stringify(env.sheet.rows);
+  for (const arg of weird) {
+    const label = weird.indexOf(arg);
+    for (const name of ['doGet', 'doPost']) {
+      let out;
+      assert.doesNotThrow(() => (out = env.gas[name](arg)), `${name}(weird[${label}])`);
+      assert.equal(typeof out.getContent, 'function', `${name}(weird[${label}]) 은 출력 객체를 돌려준다`);
+    }
+    for (const name of ['apiRanking', 'apiSubmit']) {
+      let res;
+      assert.doesNotThrow(() => (res = env.gas[name](arg)), `${name}(weird[${label}])`);
+      res = plain(res);
+      assert.equal(typeof res.ok, 'boolean', `${name}(weird[${label}])`);
+      if (!res.ok) assert.match(res.error, /^(bad_request|invalid_nickname|invalid_score|implausible|throttled|server_busy)$/);
+    }
+  }
+  assert.equal(JSON.stringify(env.sheet.rows), before, '이상한 입력으로 행이 추가되지 않는다');
+  // setup 은 던질 수 있지만(바인딩 안 됨) 안내 문구뿐이고 아무것도 바꾸지 않는다
+  for (const arg of weird.slice(0, 12)) assert.throws(() => env.gas.setup(arg), /^Error: setup\(\)|스프레드시트/);
+  assert.equal(JSON.stringify(env.sheet.rows), before);
 });
 
 // ── 매니페스트 ───────────────────────────────────────────
