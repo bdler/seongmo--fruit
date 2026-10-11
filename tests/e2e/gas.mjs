@@ -1197,8 +1197,10 @@ scenario('diag', '진단 화면(?page=diag): iframe 안에서 그려지고, 점�
   assert.match(out, /창 크기: \d+x\d+ \(화면 \d+x\d+, 배율 [\d.]+\)/);
   assert.match(out, /iframe 안: 예/);
   assert.match(out, /문법 optional chaining: OK/);
-  assert.match(out, /정규식 lookbehind: OK/);
-  assert.match(out, /큰 캔버스 그리기: OK 픽셀=2\d\d,\d+,\d+,255/);
+  assert.match(out, /Element\.replaceChildren \(게임이 씀\): 지원/);
+  assert.match(out, /CSS :where \(게임이 씀\): 지원/);
+  assert.match(out, /CSS inset \(게임이 씀\): 지원/);
+  assert.match(out, /큰 캔버스 그리기: OK 픽셀=229,57,53,255/, '첫 색 띠(#e53935)의 픽셀이 그대로 읽혀야 함');
   assert.match(out, /서버 호출: OK \(\d+ms\)/);
   // 저장소는 iframe 종류에 따라 갈린다. 그 한 줄을 빼면 오류 줄이 없어야 한다.
   assert.match(out, env.sameOrigin ? /localStorage: OK/ : /localStorage: ERROR SecurityError/);
@@ -1210,6 +1212,27 @@ scenario('diag', '진단 화면(?page=diag): iframe 안에서 그려지고, 점�
   assert.equal(await fr.evaluate(() => document.getElementById('big').width), 1122);
   assert.deepEqual(dep.doGetCalls, [{ page: 'diag' }]);
   assert.deepEqual(dep.mocks.html.requested, [], '진단 화면은 Index 를 읽지 않는다');
+});
+
+scenario('diag-mobile', '진단 화면(?page=diag) 모바일 390x844: 시험 영역 ①②③ 과 안내가 첫 화면(스크롤 없이) 안에 있고, 긴 기기 문자열이 와도 가로로 넘치지 않는다', {
+  noPage: true, rows: sampleSheet(3), viewport: { width: 390, height: 844 }, mobile: true, modes: ['same'],
+}, async (env) => {
+  const { page, dep } = env;
+  await page.goto(dep.url + '?page=diag');
+  await page.waitForSelector('iframe#userHtmlFrame');
+  const fr = await (await page.locator('iframe#userHtmlFrame').elementHandle()).contentFrame();
+  await fr.waitForFunction(() => /서버 호출: OK/.test(document.getElementById('out')?.textContent ?? ''), null, { timeout: 8000 });
+  const m = await fr.evaluate(() => {
+    const b = (sel) => Math.round(document.querySelector(sel).getBoundingClientRect().bottom);
+    return { tests: b('.tests'), hint: b('.hint'), iw: innerWidth, ih: innerHeight, sw: document.documentElement.scrollWidth, cells: [...document.querySelectorAll('.cell')].map((c) => Math.round(c.getBoundingClientRect().width)) };
+  });
+  assert.equal(m.iw, 390);
+  assert.ok(m.tests <= 480, `시험 영역이 첫 화면 안에 있어야 함: ${JSON.stringify(m)}`);
+  assert.ok(m.hint <= 560, `안내 문구도 첫 화면 안에 있어야 함: ${JSON.stringify(m)}`);
+  assert.ok(m.sw <= m.iw, `가로로 넘치면 안 됨: ${JSON.stringify(m)}`);
+  assert.ok(m.cells.every((w) => w >= 90), `세 칸이 모두 충분히 넓어야 함: ${JSON.stringify(m)}`);
+  // 큰 캔버스 칸은 찌그러뜨리지 않고 잘라서 보여 준다 (object-fit: cover)
+  assert.equal(await fr.evaluate(() => getComputedStyle(document.getElementById('big')).objectFit), 'cover');
 });
 
 scenario('exec-routing', '웹 앱 주소 라우팅: 주소만 열면 화면, ?action=ranking 은 JSON, 알 수 없는 action 은 bad_request, POST 는 JSON, Index 가 없으면 친절한 안내', {

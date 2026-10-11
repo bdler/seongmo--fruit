@@ -13,8 +13,10 @@
   <script>
     (function () {
       var shown = 0;
+      var seen = {};
       function show(msg) {
-        if (shown >= 3) return;
+        if (seen[msg] || shown >= 3) return; // 같은 오류는 한 번만, 전체로도 3개까지만 (반복 오류가 화면을 덮지 않도록)
+        seen[msg] = true;
         shown++;
         try {
           var box = document.createElement('div');
@@ -30,12 +32,16 @@
       window.addEventListener('error', function (ev) {
         var m = (ev && ev.message) || '알 수 없는 오류';
         if (/ResizeObserver loop/i.test(m)) return;
+        // 출처도 줄 번호도 없는 "Script error." 는 다른 출처의 스크립트(예: 바깥 래퍼)가 낸 것이라 우리 코드의 오류가 아니고
+        // 알 수 있는 것도 없다. 이 화면의 인라인 스크립트 오류는 늘 메시지와 줄 번호가 함께 온다.
+        if (m === 'Script error.' && !(ev && ev.filename) && !(ev && ev.lineno)) return;
         var where = ev && ev.filename ? ' @' + String(ev.filename).split('/').pop() + ':' + (ev.lineno || 0) : '';
         show(m + where);
       });
       window.addEventListener('unhandledrejection', function (ev) {
         var r = ev && ev.reason;
-        show('처리되지 않은 오류 ' + ((r && r.message) || r));
+        var why = r && r.message ? r.message : (r === undefined || r === null ? '이유 없음' : String(r));
+        show('처리되지 않은 거부: ' + why);
       });
     })();
   </script>
