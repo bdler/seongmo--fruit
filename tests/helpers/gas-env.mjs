@@ -57,7 +57,7 @@ export const CODE_GS_URL = new URL('../../gas/Code.gs', import.meta.url);
 const FN_NAMES = ['doGet', 'doPost', 'setup', 'apiRanking', 'apiSubmit', 'page_', 'submitScore_', 'sanitizeNickname_', 'isPlausible_', 'getRanking_', 'diagHtml_', 'diagPage_'];
 const CONST_NAMES = [
   'MAX_SCORE', 'MAX_SCORE_PER_DROP', 'MIN_MS_PER_DROP', 'RANKING_KEEP', 'RANKING_CACHE_SEC', 'THROTTLE_SEC', 'MAX_NICKNAME',
-  'MAX_BODY_CHARS', 'PAGE_FILE', 'PAGE_TITLE', 'PAGE_VIEWPORT', 'PAGE_DIAG_TITLE', 'PAGE_MISSING_MESSAGE',
+  'MAX_BODY_CHARS', 'PAGE_FILE', 'PAGE_TITLE', 'PAGE_VIEWPORT', 'PAGE_DIAG_TITLE', 'PAGE_MISSING_MESSAGE', 'ALLOW_EMBED',
 ];
 
 // ── 시트 ────────────────────────────────────────────────
@@ -143,6 +143,8 @@ class HtmlOutputMock {
     return this;
   }
   setXFrameOptionsMode(mode) {
+    if (this.failXFrame?.()) throw new Error('X-Frame-Options 설정 거부 (모의)');
+    if (mode !== 'ALLOWALL' && mode !== 'DEFAULT') throw new Error(`setXFrameOptionsMode: HtmlService.XFrameOptionsMode 값이 필요합니다 (받은 값: ${String(mode)})`);
     this.xFrameOptionsMode = mode;
     return this;
   }
@@ -164,6 +166,7 @@ function createHtmlService(html) {
       html.requested.push(name);
       if (typeof name !== 'string' || !html.files.has(name)) throw new Error('Unknown file: ' + name);
       const out = new HtmlOutputMock(name, html.files.get(name));
+      out.failXFrame = () => html.failXFrame;
       html.outputs.push(out);
       return out;
     },
@@ -173,6 +176,7 @@ function createHtmlService(html) {
       if (html.failCreate) throw new Error('createHtmlOutput 실패 (모의)');
       if (typeof content !== 'string') throw new Error('createHtmlOutput: 문자열이 필요합니다');
       const out = new HtmlOutputMock(null, content);
+      out.failXFrame = () => html.failXFrame;
       html.outputs.push(out);
       return out;
     },
@@ -210,6 +214,7 @@ export function loadGas({ files = {}, rows, hasSheet = true, sheetId = SHEET_ID,
       requested: [],
       created: [],
       failCreate: false,
+      failXFrame: false, // true 면 setXFrameOptionsMode 가 던진다
       outputs: [],
     },
   };

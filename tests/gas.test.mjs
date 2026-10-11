@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 
 import { scoreOf, WATERMELON_PAIR_BONUS, LAST_LEVEL, MAX_DROP_LEVEL, TIMING } from '../js/config.js';
-import { HEADER, SHEET_ID, loadGas, publicFunctions, createScriptRun } from './helpers/gas-env.mjs';
+import { HEADER, SHEET_ID, CODE_GS_URL, loadGas, publicFunctions, createScriptRun } from './helpers/gas-env.mjs';
 
 const SOURCE = readFileSync(new URL('../gas/Code.gs', import.meta.url), 'utf8');
 const MANIFEST = JSON.parse(readFileSync(new URL('../gas/appsscript.json', import.meta.url), 'utf8'));
@@ -221,6 +221,51 @@ test('화면: 서버의 viewport 는 개발용 index.html 의 viewport 에서 vi
   assert.equal(PAGE_FILE, 'Index');
 });
 
+test('삽입 허용: 게임/진단 화면은 X-Frame-Options 를 ALLOWALL 로 풀어, 다른 페이지(허브)의 iframe 안에서도 열린다', () => {
+  assert.equal(createEnv().gas.consts.ALLOW_EMBED, true);
+  for (const parameter of [{}, { page: 'diag' }, { meta: 'none' }, { page: 'diag', meta: 'none' }, { limit: '5' }]) {
+    const out = createEnv().gas.doGet({ parameter });
+    assert.equal(out.xFrameOptionsMode, 'ALLOWALL', JSON.stringify(parameter));
+    assert.ok(out.getTitle(), '제목도 그대로 있어야 함');
+  }
+});
+
+test('삽입 허용: ALLOW_EMBED 를 false 로 바꾸면 설정하지 않는다 (Apps Script 기본 동작)', () => {
+  const source = readFileSync(CODE_GS_URL, 'utf8').replace('const ALLOW_EMBED = true;', 'const ALLOW_EMBED = false;');
+  assert.ok(source.includes('const ALLOW_EMBED = false;'), '치환이 적용돼야 함');
+  for (const parameter of [{}, { page: 'diag' }]) {
+    const env = createEnv({ source });
+    const out = env.gas.doGet({ parameter });
+    assert.equal(out.xFrameOptionsMode, null, JSON.stringify(parameter));
+    assert.equal(out.getTitle().length > 0, true);
+    assert.equal(out.getMetaTags().length, 1);
+  }
+});
+
+test('삽입 허용: X-Frame-Options 설정이 거부돼도 던지지 않고 화면은 열린다 (제목/메타 유지, 원인은 로그에만)', () => {
+  for (const parameter of [{}, { page: 'diag' }]) {
+    const env = createEnv();
+    env.html.failXFrame = true;
+    let out;
+    assert.doesNotThrow(() => { out = env.gas.doGet({ parameter }); }, JSON.stringify(parameter));
+    assert.equal(out.xFrameOptionsMode, null);
+    assert.ok(out.getContent().includes('<'), '화면 HTML 이 그대로 나와야 함');
+    assert.ok(out.getTitle());
+    assert.deepEqual(out.getMetaTags().map((t) => t.name), ['viewport'], '메타 태그도 이어서 붙는다');
+    assert.equal(env.errors.length, 1);
+    assert.match(env.errors[0], /X-Frame-Options 설정 거부/);
+  }
+});
+
+test('삽입 허용: 모의 HtmlOutput 은 실제처럼 열거형 값만 받는다 (오타가 조용히 지나가지 않는다)', () => {
+  const env = createEnv();
+  const out = env.gas.doGet({ parameter: {} });
+  assert.throws(() => out.setXFrameOptionsMode('allowall'), /XFrameOptionsMode/);
+  assert.throws(() => out.setXFrameOptionsMode(undefined), /XFrameOptionsMode/);
+  assert.equal(out.setXFrameOptionsMode('DEFAULT'), out);
+  assert.equal(out.xFrameOptionsMode, 'DEFAULT');
+});
+
 test('진단 화면: ?page=diag 는 Index 를 읽지 않고 진단 HTML 을 제목/viewport 와 함께 내보낸다', () => {
   const env = createEnv({ rows: [HEADER, row(1000, 'a', 10)] });
   const out = env.gas.doGet({ parameter: { page: 'diag' } });
@@ -263,6 +308,7 @@ test('진단 화면: 외부 주소 없이 스스로 완결되고, 스크립트�
   assert.doesNotThrow(() => new vm.Script(scripts[0], { filename: 'diag.js' }));
   assert.ok(!/=>|\blet\b|\bconst\b|\?\.|\?\?/.test(scripts[0].replace(/new Function\("[^"]*"\)/, '')), '진단 스크립트 본문은 ES5 만 쓴다');
   assert.match(scripts[0], /\.apiRanking\(1\)/);
+  assert.match(scripts[0], /ancestorOrigins/, '허브 등 상위 페이지를 보여 주는 줄이 있어야 함');
   assert.match(html, /<title>|<h1>수박 합치기 진단 화면<\/h1>/);
   assert.ok(html.length < 12000, `진단 화면이 너무 큼: ${html.length}`);
 });

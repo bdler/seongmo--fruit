@@ -93,7 +93,7 @@
 | | A. GAS `HtmlService` 로 화면까지 서빙 **(기본, 현재 배포 방식)** | B. GitHub Pages + GAS API (선택) |
 |---|---|---|
 | 장점 | 배포 대상이 하나(웹 앱 주소 하나), CORS/리다이렉트 문제가 없음(`google.script.run`), 화면 호스팅이 따로 필요 없음, 같은 서버 규칙을 거침 | Git 중심 개발, 로딩 빠름, 로컬 개발 쉬움, 외부 클라이언트와 같은 JSON API |
-| 단점 | iframe 샌드박스 제약(`location.search` 에 방문자의 쿼리가 안 실림, 저장소가 막힐 수 있음), 로딩이 느림, 화면을 한 파일(`gas/Index.html`)로 묶는 빌드가 필요, 다른 사이트 iframe 삽입 미보장([§7.4](#74-배포-절차)) | 배포 대상이 둘(페이지 + GAS), CORS preflight 제약([§8.1](#81-cors-규칙-fetch-통로-가장-흔한-함정)) |
+| 단점 | iframe 샌드박스 제약(`location.search` 에 방문자의 쿼리가 안 실림, 저장소가 막힐 수 있음), 로딩이 느림, 화면을 한 파일(`gas/Index.html`)로 묶는 빌드가 필요, 다른 사이트 iframe 삽입은 `ALLOW_EMBED`(`ALLOWALL`)로 허용하지만 실기기 미확인([§7.4](#74-배포-절차)) | 배포 대상이 둘(페이지 + GAS), CORS preflight 제약([§8.1](#81-cors-규칙-fetch-통로-가장-흔한-함정)) |
 
 **소유자는 A 로 배포합니다.** 개발은 계속 정적 파일 + ES Modules(`index.html`, `js/`, `css/`)로 하고, 배포용 `gas/Index.html` 은 `npm run build:gas` 가 만든 생성물(직접 고치지 않음)입니다. 코드는 두 방식을 모두 지원합니다: `js/api.js` 는 호출할 때마다 `window.google.script.run` 이 있으면 그것을, 없으면 `API_URL` 의 `fetch` 를 씁니다([§8.2](#82-apijs)). B 방식(GitHub Pages)도 그대로 동작합니다.
 
@@ -194,7 +194,7 @@ npm run test:e2e:gas   # Apps Script 배포 모의(gas/Index.html 을 sandbox if
 ```
 
 - 이미 설치된 Chromium 을 쓰려면 `CHROMIUM_PATH=/경로/chrome npm run test:e2e`, 일부 시나리오만 돌리려면 `npm run test:e2e:smoke -- --only=a,c` (또는 `test:e2e:gas`), 창을 보려면 `-- --headed`. smoke 의 시나리오 id 는 `a b b2 c d e e2 f g g2 h h2~h5 i1~i3 j k k2 l m n1~n4` 이고, 각 id 의 제목은 `tests/e2e/smoke.mjs` 에 있다.
-- **gas e2e (`tests/e2e/gas.mjs`)**: 진짜 `gas/Code.gs` + 진짜 `gas/Index.html` 을 Apps Script 처럼 서빙한다. 웹 앱 주소로 GET 이 오면 진짜 `doGet()` 이 불리고, 돌려받은 `HtmlOutput` 의 title/viewport meta 로 바깥 래퍼 페이지를 만들고 그 안의 sandbox iframe(서로 다른 origin, `allow-same-origin` 이 있는 것과 없는 것 둘 다)에 화면을 넣는다. iframe 안의 `google.script.run` 은 `window.google.script.run` 흉내(호출마다 새 실행기, 비동기, JSON 값만)로 Node 의 진짜 `apiRanking/apiSubmit` 에 연결되고, 시나리오마다 지연/실패/응답 유실/먹통/이상한 결과를 주입한다. 하네스 서버 밖으로 나가는 요청, 콘솔 오류/경고, `pageerror` 는 실패다. 시나리오 id 는 `load layout-390 layout-1280 play ranking ranking-empty submit throttle idempotent failure server-errors concurrent boot-pending timeout offline offline-pending late-google fetch-only google-wins no-debug storage-blocked exec-routing` 이고 (대부분 `@same`/`@opaque` 두 번), `--only=submit` 처럼 고른다. `--bail` 은 첫 실패에서 멈추고, `--shots=폴더` 는 iframe 안 화면 스크린샷만 저장한다.
+- **gas e2e (`tests/e2e/gas.mjs`)**: 진짜 `gas/Code.gs` + 진짜 `gas/Index.html` 을 Apps Script 처럼 서빙한다. 웹 앱 주소로 GET 이 오면 진짜 `doGet()` 이 불리고, 돌려받은 `HtmlOutput` 의 title/viewport meta 로 바깥 래퍼 페이지를 만들고 그 안의 sandbox iframe(서로 다른 origin, `allow-same-origin` 이 있는 것과 없는 것 둘 다)에 화면을 넣는다. iframe 안의 `google.script.run` 은 `window.google.script.run` 흉내(호출마다 새 실행기, 비동기, JSON 값만)로 Node 의 진짜 `apiRanking/apiSubmit` 에 연결되고, 시나리오마다 지연/실패/응답 유실/먹통/이상한 결과를 주입한다. 하네스 서버 밖으로 나가는 요청, 콘솔 오류/경고, `pageerror` 는 실패다. 시나리오 id 는 `load layout-390 layout-1280 play ranking ranking-empty submit throttle idempotent failure server-errors concurrent boot-pending timeout offline offline-pending late-google fetch-only google-wins no-debug storage-blocked hub hub-blocked diag diag-mobile exec-routing` 이고 (대부분 `@same`/`@opaque` 두 번), `--only=submit` 처럼 고른다. `--bail` 은 첫 실패에서 멈추고, `--shots=폴더` 는 iframe 안 화면 스크린샷만 저장한다.
 - **이 하네스는 진짜 Apps Script 가 아니라 그 동작의 모형이다.** 바깥 래퍼 페이지의 정확한 모양, sandbox 속성 조합, `google.script.run` 의 오류/직렬화 세부, HtmlService 의 세부 동작은 공식 문서로 확인하지 못한 가정이다(모의 헬퍼 `tests/helpers/gas-env.mjs` 머리말에도 같은 단서가 있다). 그래서 이 e2e 가 통과해도 실제 배포에서의 확인([§9](#9-개발-로드맵마일스톤) 남은 일)은 대신하지 못한다.
 - gas e2e 는 **`gas/Index.html` 을 읽으므로** `js/`, `css/`, `index.html` 을 고친 뒤에는 `npm run build:gas` 가 먼저다 (`npm test` 의 최신성 검사가 그렇게 알려 준다).
 - smoke e2e 는 **`js/config.js` 의 `API_URL` 과 무관하게** 동작합니다. 하네스가 모든 시나리오에서 이 값을 `''`(오프라인) 또는 가짜 URL 로 바꿔 서빙하므로, 운영 URL 을 넣은 뒤에도 외부로 요청이 나가지 않습니다.
@@ -534,7 +534,7 @@ curl -L "https://script.google.com/macros/s/<DEPLOY_ID>/exec?action=ranking&limi
 
 **코드/화면을 고친 뒤**: `js/`, `css/`, `index.html` 을 고쳤다면 `npm run build:gas` → `Index` 파일 내용 교체 → **배포 → 배포 관리 → 편집(연필) → 버전: 새 버전 → 배포**. 이렇게 하면 같은 URL 이 유지된다(새 배포를 만들면 URL 이 바뀐다). 웹 앱 `/exec` 는 **저장된 코드가 아니라 "배포된 버전"** 을 실행하고, `/dev` 는 편집 권한이 있는 사람에게만 열리며 저장된 최신 코드를 실행한다(공식 문서). 생성물이 최신인지는 `npm test`(최신성 검사)와 `npm run check:gas` 가 확인한다.
 
-**다른 사이트의 iframe 에 넣기**: 이 코드는 `setXFrameOptionsMode` 를 부르지 않으므로 Apps Script 의 기본값(`DEFAULT`, 클릭재킹을 막는 기본 보안 가정)이 적용된다. 공식 문서에 따르면 `ALLOWALL` 을 지정해야 아무 사이트나 iframe 으로 넣을 수 있다. 따라서 **다른 사이트에 iframe 으로 끼워 넣는 것은 지원하지도 시험하지도 않았다.** 가장 쉬운 방법은 `/exec` 주소로 링크하는 것이다. 정말 필요하면 `page_()` 의 반환값에 `.setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL)` 을 이어 붙이면 되지만(미확인), 아무 사이트나 이 화면을 겹쳐 넣을 수 있게 되는 클릭재킹 위험을 감수하는 결정이다.
+**다른 사이트의 iframe 에 넣기(허브)**: Apps Script 는 아무 설정이 없으면(`DEFAULT`) 다른 사이트가 화면을 iframe 에 넣지 못하게 막는 쪽으로 동작한다. 그러면 허브 안의 칸이 비어 허브의 배경(검정이면 검은 화면)만 보이고 주소를 직접 열면 멀쩡해서 원인을 알아채기 어렵다. 그래서 `Code.gs` 의 `finishOutput_()` 이 게임 화면과 진단 화면의 `HtmlOutput` 마다 `setXFrameOptionsMode(ALLOWALL)` 을 건다(`ALLOW_EMBED = true`, 기본). 공식 문서에 따르면 `ALLOWALL` 은 아무 사이트나 iframe 에 넣게 하는 대신 클릭재킹 방어를 개발자가 책임진다는 뜻이다. 이 게임에는 로그인/결제 같은 동작이 없어 잃을 것이 적다고 보고 허용했고, 필요 없으면 `ALLOW_EMBED = false` 로 끈다. 설정이 거부돼도(`setXFrameOptionsMode` 가 던져도) 화면은 열리고 원인은 실행 로그에만 남는다. 게임 안내 문구용 오류 화면(Index 가 없을 때의 `ContentService` 텍스트)은 HtmlOutput 이 아니라 이 설정 대상이 아니다. **미확인**: 진짜 Apps Script 가 `DEFAULT` 에서 보내는 헤더 값(하네스는 `SAMEORIGIN` 으로 흉내 낸다), 사파리에서 허브 안(창 두 겹)일 때의 실제 동작과 `localStorage` 제한. gas e2e 의 `hub` 시나리오(허브 → 래퍼 → 게임 두 겹에서 시작/드롭/랭킹)와 `hub-blocked` 시나리오(`ALLOW_EMBED=false` 면 브라우저가 삽입을 막아 게임이 안 뜬다 = 증상 재현)가 이 모형을 고정한다.
 
 **방식 B (선택): GitHub Pages + GAS API** — 위 2번에서 `Code.gs`(와 선택적으로 매니페스트)만 넣고 `Index` 파일은 넣지 않아도 된다(주소를 열면 안내 문구가 나오고 JSON API 는 동작한다). 3, 4번을 하고, 발급된 `…/exec` URL 을 `js/config.js` 의 `API_URL` 에 넣어 화면을 따로 호스팅한다. `API_URL` 을 바꾸면 `gas/Index.html` 도 다시 빌드해야 최신성 검사가 통과한다.
 
@@ -633,7 +633,7 @@ submitScore({ nickname, score, maxLevel, playTimeMs, drops, clientId }, opts?)  
 | 통합 | `tests/integration.test.mjs` | 실제 Matter 로 한 판을 끝까지 돌려 `api.js` → `Code.gs`(모의) 로 흘려 보냄(`fetch` 와 `google.script.run` 두 통로, 같은 시트를 공유). 같은 시드의 결정성도 확인 |
 | 정적 | `tests/static.test.mjs` | 뷰포트 메타, 접근성 이름, 색 대비, 레이아웃 계약, `package.json` 계약 |
 | e2e | `tests/e2e/smoke.mjs` | 헤드리스 Chromium 로 실제 페이지(가짜 API 서버 사용): 입력, 합치기, 게임오버, 랭킹/제출/재전송, 반응형(세로/가로/300% 확대 에뮬레이션), 키보드, 음소거, 모션 줄이기 |
-| e2e | `tests/e2e/gas.mjs` | Apps Script 배포 모의: 진짜 `Code.gs`/`Index.html`, 바깥 래퍼 + sandbox iframe, 모의 `google.script.run`(지연/실패/유실/타임아웃/이상한 결과). 랭킹, 등록(시트 7열), 멱등 재전송, 부팅 시 재전송, 오프라인, fetch 통로, 통로 우선순위(`google-wins`, `late-google`), 저장소가 막힌 iframe, 운영 모습에서 디버그 훅 비노출, 웹 앱 주소 라우팅(`exec-routing`). 진짜 Apps Script 가 아니라 모형이다([§4](#테스트-실행)) |
+| e2e | `tests/e2e/gas.mjs` | Apps Script 배포 모의: 진짜 `Code.gs`/`Index.html`, 바깥 래퍼 + sandbox iframe, 모의 `google.script.run`(지연/실패/유실/타임아웃/이상한 결과). 랭킹, 등록(시트 7열), 멱등 재전송, 부팅 시 재전송, 오프라인, fetch 통로, 통로 우선순위(`google-wins`, `late-google`), 저장소가 막힌 iframe, 운영 모습에서 디버그 훅 비노출, 웹 앱 주소 라우팅(`exec-routing`), 다른 출처 허브 페이지 안 iframe 삽입(`hub`, `hub-blocked`). 진짜 Apps Script 가 아니라 모형이다([§4](#테스트-실행)) |
 
 백엔드 항목은 자동 테스트가 `Code.gs` 를 **모의 서비스 위에서** 확인한 것이다. 실제 스프레드시트/배포에서의 확인은 직접 해야 한다. 아래 체크리스트에서 `(자동)` 표시는 위 테스트가 이미 확인하는 항목이고, 나머지는 기기/서버에서 직접 확인한다.
 
@@ -753,7 +753,7 @@ submitScore({ nickname, score, maxLevel, playTimeMs, drops, clientId }, opts?)  
 | 8 | 감 아이콘 | 🟠 (이모지에 감이 없음) | 스프라이트 제작 시 교체 |
 | 9 | 닉네임의 ZWJ/ZWNJ(U+200D/200C) | 제거한다. 그래서 `👩‍💻` 같은 합성 이모지는 `👩💻` 로 갈라지고, 제로폭 문자만으로 된 이름은 거부된다 | 글자 사이의 ZWJ/ZWNJ 는 보존하고 맨 앞/뒤/단독일 때만 제거(합성 이모지 유지, 구현이 더 복잡) |
 | 10 | 배포용 `gas/Index.html` | **생성물을 커밋한다**(소유자가 Node 없이 파일을 복사해 붙여 넣을 수 있게. 최신성은 `npm test` 가 강제) | 커밋하지 않고 릴리스 때마다 빌드/CI 로 만든다 |
-| 11 | 다른 사이트 iframe 삽입 | 지원하지 않는다(`X-Frame-Options` 를 건드리지 않아 Apps Script 기본값. 링크로 연결) | `page_()` 에 `setXFrameOptionsMode(ALLOWALL)` 추가(클릭재킹 방어를 포기하는 대가, 미검증) |
+| 11 | 다른 사이트 iframe 삽입 | 허용(`ALLOW_EMBED = true`, `finishOutput_()` 이 `ALLOWALL` 을 건다. 허브 안에서 검은 화면이 나오던 원인) | `false` 로 끄면 Apps Script 기본값(삽입 차단). 허용하면 클릭재킹 방어를 우리가 책임진다. 실기기 미검증 |
 
 ---
 

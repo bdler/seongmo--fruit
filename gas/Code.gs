@@ -4,6 +4,7 @@
  *
  *   GET  (action 없음)               -> 게임 화면 (Index.html). 웹 앱 주소를 그냥 열면 이것이 나온다.
  *   GET  ?page=diag                  -> 진단 화면. 폰에서 게임 화면이 검게/비게 나올 때 원인을 보려고 연다. (?meta=none 은 viewport 메타 없이 연다)
+ *   (게임/진단 화면은 ALLOW_EMBED 가 true 이면 다른 페이지의 iframe 안에서도 열린다. 아래 상수의 설명 참고)
  *   GET  ?action=ranking&limit=10    -> { ok: true, data: [{ nickname, score, maxLevel, at }] }   (외부 클라이언트용 JSON)
  *   POST text/plain JSON 본문         -> { ok: true } | { ok: false, error: '<코드>' }              (외부 클라이언트용 JSON)
  *   google.script.run.apiRanking(limit) / apiSubmit(payload)
@@ -60,6 +61,12 @@ const PAGE_TITLE = '수박 합치기';
 // CSS 는 그 값이 0 이어도 동작하도록 쓰여 있다.
 const PAGE_VIEWPORT = 'width=device-width, initial-scale=1';
 const PAGE_DIAG_TITLE = '수박 합치기 진단';
+// 다른 페이지(예: 여러 게임을 모아 놓은 허브 페이지) 안의 iframe 으로 이 웹 앱을 열 수 있게 할지.
+// Apps Script 는 기본값(DEFAULT)으로 X-Frame-Options 헤더를 보내 다른 사이트가 이 화면을 iframe 에 넣지 못하게 막는다.
+// 그러면 허브 안의 칸이 비어서 허브의 배경색(검정이면 검은 화면)만 보이고, 주소를 직접 열면 멀쩡해서 원인을 찾기 어렵다.
+// ALLOWALL 은 그 헤더를 없애 어느 페이지에서든 넣을 수 있게 하는 대신 클릭재킹 방어를 우리가 책임진다는 뜻이다(공식 문서).
+// 이 게임에는 로그인/결제 같은 동작이 없어 잃을 것이 적다. 다른 곳에 넣을 일이 없으면 false 로 바꿔도 된다.
+const ALLOW_EMBED = true;
 const PAGE_MISSING_MESSAGE =
   '게임 화면 파일(Index.html)을 불러오지 못했습니다.\n' +
   'Apps Script 편집기 왼쪽 파일 목록에서 + → HTML 을 눌러 이름을 Index 로 만들고(.html 은 자동으로 붙습니다), ' +
@@ -138,11 +145,25 @@ function apiSubmit(payload) {
 // 파일이 없거나 읽을 수 없으면 스택 트레이스 없이 무엇을 해야 하는지만 알려 준다.
 function page_(params) {
   try {
-    return withMeta_(HtmlService.createHtmlOutputFromFile(PAGE_FILE).setTitle(PAGE_TITLE), params);
+    return finishOutput_(HtmlService.createHtmlOutputFromFile(PAGE_FILE), PAGE_TITLE, params);
   } catch (err) {
     console.error(String((err && err.stack) || err));
     return ContentService.createTextOutput(PAGE_MISSING_MESSAGE);
   }
+}
+
+// 화면(HtmlOutput) 마무리: 제목, 다른 페이지에 넣을 수 있게 하는 설정, viewport 메타.
+// X-Frame-Options 설정이 거부돼도 화면 자체는 열려야 하므로 그 한 줄만 감싼다 (직접 주소로는 계속 열린다).
+function finishOutput_(output, title, params) {
+  output.setTitle(title);
+  if (ALLOW_EMBED) {
+    try {
+      output.setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+    } catch (err) {
+      console.error('X-Frame-Options 설정 거부: ' + String((err && err.message) || err));
+    }
+  }
+  return withMeta_(output, params);
 }
 
 // 서버가 넣는 viewport 메타 태그. ?meta=none 이면 넣지 않는다.
@@ -156,7 +177,7 @@ function withMeta_(output, params) {
 // 외부 주소를 전혀 쓰지 않고, 오래된 브라우저에서도 돌도록 일부러 옛 문법(ES5)만 쓴다.
 function diagPage_(params) {
   try {
-    return withMeta_(HtmlService.createHtmlOutput(diagHtml_()).setTitle(PAGE_DIAG_TITLE), params);
+    return finishOutput_(HtmlService.createHtmlOutput(diagHtml_()), PAGE_DIAG_TITLE, params);
   } catch (err) {
     console.error(String((err && err.stack) || err));
     return ContentService.createTextOutput('진단 화면을 만들지 못했습니다.');
@@ -211,6 +232,7 @@ function diagHtml_() {
     '  tryit("창 크기", function () { return innerWidth + "x" + innerHeight + " (화면 " + screen.width + "x" + screen.height + ", 배율 " + devicePixelRatio + ")"; });',
     '  tryit("visualViewport", function () { var v = window.visualViewport; return v ? Math.round(v.width) + "x" + Math.round(v.height) + " 배율 " + v.scale : "없음"; });',
     '  tryit("iframe 안", function () { return window.top !== window ? "예" : "아니오(최상위)"; });',
+    '  tryit("상위 페이지(안쪽 > 바깥쪽)", function () { var a = window.location.ancestorOrigins; if (!a) return "알 수 없음(이 브라우저는 제공하지 않음)"; var r = []; for (var i = 0; i < a.length; i++) r.push(a[i]); return r.length ? r.join(" > ") : "없음(최상위)"; });',
     '  tryit("다크 모드", function () { return window.matchMedia("(prefers-color-scheme: dark)").matches ? "예" : "아니오"; });',
     '  tryit("CSS dvh", function () { return CSS.supports("height", "100dvh") ? "지원" : "미지원"; });',
     '  tryit("CSS backdrop-filter", function () { return (CSS.supports("backdrop-filter", "blur(1px)") || CSS.supports("-webkit-backdrop-filter", "blur(1px)")) ? "지원" : "미지원"; });',

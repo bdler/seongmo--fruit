@@ -33,6 +33,7 @@ import { FRUITS, WORLD, TIMING, STORAGE_KEYS, scoreOf } from '../../js/config.js
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const INDEX_FILE = path.join(ROOT, 'gas/Index.html');
+const CODE_FILE = path.join(ROOT, 'gas/Code.gs');
 const BASE = '/macros/s/TEST';
 const EXEC_PATH = `${BASE}/exec`;
 const PANEL_PATH = `${BASE}/userCodeAppPanel`;
@@ -62,9 +63,10 @@ export function sampleSheet(n = 5, { xss = true } = {}) {
 }
 
 // 시나리오 하나가 쓰는 '배포'. gas: 진짜 Code.gs, mocks: 모의 서비스 상태.
-export async function startDeployment({ indexHtml, withIndex = true, rows, sameOrigin = true, iframeQuery = '?debug' } = {}) {
+// source: Code.gs 소스를 바꿔서 돌릴 때(예: ALLOW_EMBED=false). hub: 다른 출처의 '허브' 페이지 서버를 함께 띄운다 (그 안 iframe 에 웹 앱을 넣는다).
+export async function startDeployment({ indexHtml, withIndex = true, rows, sameOrigin = true, iframeQuery = '?debug', source, hub = false } = {}) {
   const html = indexHtml ?? (await fs.readFile(INDEX_FILE, 'utf8'));
-  const { gas, mocks } = loadGas({ files: withIndex ? { Index: html } : {}, rows });
+  const { gas, mocks } = loadGas({ files: withIndex ? { Index: html } : {}, rows, source });
   const dep = {
     gas,
     mocks,
@@ -134,7 +136,13 @@ ${metas.join('\n')}
         if (url.pathname === EXEC_PATH && req.method === 'GET') {
           const out = callDoGet(url);
           dep.output = out;
-          if (typeof out.getTitle === 'function') return send(200, { 'content-type': 'text/html; charset=utf-8' }, wrapper(out));
+          if (typeof out.getTitle === 'function') {
+            const headers = { 'content-type': 'text/html; charset=utf-8' };
+            // Apps Script 는 기본(DEFAULT)으로 다른 출처가 이 화면을 iframe 에 넣지 못하게 막는다. 실제 헤더 값은 미확인이라 SAMEORIGIN 으로 흉내 낸다.
+            // ALLOWALL 이면 헤더를 보내지 않는다 (공식 문서: ALLOWALL 은 어느 사이트든 iframe 에 넣게 한다).
+            if (out.xFrameOptionsMode !== 'ALLOWALL') headers['x-frame-options'] = 'SAMEORIGIN';
+            return send(200, headers, wrapper(out));
+          }
           const r = textResponse(out);
           return send(r.status, r.headers, r.body);
         }
@@ -156,10 +164,24 @@ ${metas.join('\n')}
   dep.origin = `http://127.0.0.1:${port}`;
   dep.panelOrigin = `http://localhost:${port}`;
   dep.url = dep.origin + EXEC_PATH;
-  dep.close = () => new Promise((resolve) => {
-    server.close(resolve);
-    server.closeAllConnections?.();
-  });
+
+  // 허브: 다른 출처(포트가 다르다)의 검은 배경 페이지가 웹 앱 주소를 전체 화면 iframe 으로 띄운다. 게임 → 래퍼(/exec) → 허브의 두 겹 iframe 이 된다.
+  let hubServer = null;
+  if (hub) {
+    hubServer = http.createServer((req, res) => {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+      res.end(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>허브</title>
+<style>html,body{margin:0;height:100%;background:#000}iframe{position:absolute;top:0;left:0;width:100%;height:100%;border:0}</style></head>
+<body><iframe id="hubFrame" src="${esc(dep.url)}"></iframe></body></html>`);
+    });
+    await new Promise((resolve) => hubServer.listen(0, '127.0.0.1', resolve));
+    dep.hubOrigin = `http://127.0.0.1:${hubServer.address().port}`;
+    dep.hubUrl = `${dep.hubOrigin}/hub`;
+  }
+  dep.close = () => Promise.all([server, hubServer].filter(Boolean).map((s) => new Promise((resolve) => {
+    s.close(resolve);
+    s.closeAllConnections?.();
+  })));
   return dep;
 }
 
@@ -246,8 +268,8 @@ export function createController(dep) {
 }
 
 // 브라우저 안 google.script.run 흉내 (iframe 에만 심는다). 직렬화해서 보내므로 바깥 변수를 쓰지 않는다.
-function installGoogleStub({ names }) {
-  if (window === window.top) return; // 바깥 래퍼 페이지에는 google.script 가 없다
+function installGoogleStub({ names, panelPath }) {
+  if (window === window.top || location.pathname !== panelPath) return; // 바깥 래퍼 페이지/허브 안의 래퍼 프레임에는 google.script 가 없다
   const legal = (v, p) => {
     if (v === null || ['string', 'number', 'boolean'].includes(typeof v)) return;
     if (Array.isArray(v)) return v.forEach((x, i) => legal(x, `${p}[${i}]`));
@@ -297,6 +319,8 @@ export async function openGas(browser, o = {}) {
     pending = null,
     ignore = [],
     load = true,
+    hub = false,
+    allowEmbed = true,
   } = o;
 
   let indexHtml = await fs.readFile(INDEX_FILE, 'utf8');
@@ -305,7 +329,12 @@ export async function openGas(browser, o = {}) {
     assert.equal(indexHtml.split(from).length, 2, `번들에서 ${from} 를 하나만 찾아야 함 (테스트가 API_URL 을 바꾸지 못함)`);
     indexHtml = indexHtml.replace(from, () => `var API_URL = ${JSON.stringify(apiUrl)};`);
   }
-  const dep = await startDeployment({ indexHtml, withIndex, rows, sameOrigin, iframeQuery: query });
+  let source;
+  if (!allowEmbed) {
+    source = (await fs.readFile(CODE_FILE, 'utf8')).replace('const ALLOW_EMBED = true;', 'const ALLOW_EMBED = false;');
+    assert.ok(source.includes('const ALLOW_EMBED = false;'), 'Code.gs 에서 ALLOW_EMBED 를 찾지 못함');
+  }
+  const dep = await startDeployment({ indexHtml, withIndex, rows, sameOrigin, iframeQuery: query, source, hub });
   const ctl = createController(dep);
   const ctx = await browser.newContext({ viewport, isMobile: mobile, hasTouch: mobile, deviceScaleFactor, locale: 'ko-KR' });
   ctx.setDefaultTimeout(10000); // 깨졌을 때 시나리오마다 30초씩 기다리지 않도록 (더 오래 걸리는 기다림은 시간을 직접 준다)
@@ -317,7 +346,7 @@ export async function openGas(browser, o = {}) {
   await ctx.route('**/*', async (route) => {
     const req = route.request();
     const url = req.url();
-    if (url.startsWith(dep.origin + '/') || url.startsWith(dep.panelOrigin + '/')) return route.continue();
+    if (url.startsWith(dep.origin + '/') || url.startsWith(dep.panelOrigin + '/') || (dep.hubOrigin && url.startsWith(dep.hubOrigin + '/'))) return route.continue();
     if (apiUrl && FAKE_API_RE.test(url)) {
       const headers = { 'access-control-allow-origin': '*' };
       if (req.method() === 'OPTIONS') {
@@ -354,7 +383,7 @@ export async function openGas(browser, o = {}) {
 
   try {
     await page.exposeFunction('__gasBridge', (fn, argsJson) => ctl.handle(fn, argsJson));
-    if (!noGoogle) await page.addInitScript(installGoogleStub, { names: ctl.names });
+    if (!noGoogle) await page.addInitScript(installGoogleStub, { names: ctl.names, panelPath: PANEL_PATH });
     if (pending) {
       await page.addInitScript(([key, value]) => {
         if (window === window.top) return;
@@ -399,7 +428,7 @@ export function remainingIssues(env) {
   }
   for (const r of env.requests) {
     const u = new URL(r.url);
-    if (u.protocol === 'data:' || u.origin === env.dep.origin || u.origin === env.dep.panelOrigin) continue;
+    if (u.protocol === 'data:' || u.origin === env.dep.origin || u.origin === env.dep.panelOrigin || u.origin === env.dep.hubOrigin) continue;
     if (env.apiUrl && FAKE_API_RE.test(r.url)) continue;
     out.push({ kind: 'external-request', text: r.url });
   }
@@ -1071,7 +1100,7 @@ scenario('late-google', 'google.script.run 이 로드 뒤에 생겨도 (통로�
   await waitText(fr, 'ranking-view-status', /오프라인|연결되지/);
   await fr.click('#btn-close-ranking');
   assert.equal(ctl.calls.length, 0);
-  await fr.evaluate(installGoogleStub, { names: ctl.names }); // 이제 google.script.run 이 생겼다
+  await fr.evaluate(installGoogleStub, { names: ctl.names, panelPath: PANEL_PATH }); // 이제 google.script.run 이 생겼다
   await fr.click('#btn-view-ranking');
   await wait(fr, () => document.querySelectorAll('#ranking-view-list > li').length === 5);
   assert.equal(ctl.callsOf('apiRanking').length, 1);
@@ -1179,6 +1208,76 @@ scenario('storage-blocked', 'localStorage 가 막힌 iframe(allow-same-origin �
   await gameOver(env);
   assert.equal(await fr.inputValue('#input-nickname'), '메모리');
   assert.equal(await text(fr, '#final-best'), String(score));
+});
+
+// 허브 시험: 이 게임을 다른 출처의 페이지(여러 게임을 모은 '허브') 안 iframe 으로 띄우는 경우.
+// 허브(검은 배경) → 웹 앱 래퍼(/exec) → 게임 iframe 의 두 겹이 된다.
+const findGameFrame = async (page, dep, timeout = 8000) => {
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeout) {
+    const f = page.frames().find((fr) => fr.url().startsWith(dep.panelOrigin + PANEL_PATH));
+    if (f) return f;
+    await sleep(50);
+  }
+  return null;
+};
+
+scenario('hub', '허브(다른 출처 페이지)의 iframe 안에서 열린다: 허브 → 웹 앱 → 게임 두 겹에서 시작/드롭/랭킹이 되고, /exec 응답에 iframe 차단 헤더가 없다', {
+  noPage: true, hub: true, modes: ['same'], rows: sampleSheet(6), viewport: { width: 390, height: 844 }, mobile: true,
+}, async (env) => {
+  const { page, dep } = env;
+  assert.notEqual(dep.hubOrigin, dep.origin, '허브는 웹 앱과 다른 출처여야 함');
+  await page.goto(dep.hubUrl);
+  const fr = await findGameFrame(page, dep);
+  assert.ok(fr, '허브 안에서 게임 iframe 이 열려야 함');
+  env.fr = fr;
+  await fr.waitForFunction(() => !!window.__fruit);
+  await fr.waitForFunction(() => document.getElementById('game-canvas')?.width > 100);
+  // 두 겹: 게임 안쪽 → 웹 앱 래퍼(/exec) → 허브 순서
+  assert.deepEqual(await fr.evaluate(() => [...(location.ancestorOrigins ?? [])]), [dep.origin, dep.hubOrigin]);
+  assert.ok(page.frames().some((f) => f.url() === dep.url), '래퍼 프레임이 차단 페이지가 아니라 /exec 이어야 함');
+  assert.ok(!page.frames().some((f) => f.url().startsWith('chrome-error:')), '차단된 프레임이 없어야 함');
+  const box = await page.locator('#hubFrame').boundingBox();
+  assert.deepEqual([box.x, box.y, box.width, box.height], [0, 0, 390, 844], '허브의 iframe 이 화면을 채워야 함');
+  // 서버 응답에 차단 헤더가 없고, HtmlOutput 은 ALLOWALL 로 설정됐다
+  const res = await fetch(dep.url);
+  assert.equal(res.headers.get('x-frame-options'), null);
+  assert.equal(dep.output.xFrameOptionsMode, 'ALLOWALL');
+  // 게임이 허브 안에서 실제로 돈다: 시작 → 드롭 → 랭킹(google.script.run → 진짜 Code.gs)
+  assert.ok(await isVisible(fr, '#screen-start'));
+  await fr.locator('#btn-start').click();
+  await fr.waitForFunction(() => window.__fruit.getState() === 'READY');
+  await fr.locator('#game-canvas').click({ position: { x: 150, y: 300 } });
+  await fr.waitForFunction(() => window.__fruit.bodies().length === 1);
+  await fr.evaluate(() => window.__fruit.forceGameOver());
+  await fr.waitForFunction(() => !document.getElementById('screen-gameover').hidden);
+  await fr.waitForFunction(() => document.querySelectorAll('#ranking-list li').length === 6, null, { timeout: 8000 });
+  assert.ok(env.ctl.callsOf('apiRanking').length >= 1);
+  assert.equal(await fr.evaluate(() => window.top !== window), true);
+});
+
+scenario('hub-blocked', '대조(증상 재현): ALLOW_EMBED=false(Apps Script 기본)면 허브 안의 칸이 막혀 게임이 뜨지 않는다 — 허브의 검은 배경만 남는 원인', {
+  noPage: true, hub: true, allowEmbed: false, modes: ['same'], viewport: { width: 390, height: 844 }, mobile: true,
+  ignore: [/X-Frame-Options/i, /ERR_BLOCKED_BY_RESPONSE/i, /Refused to display/i],
+}, async (env) => {
+  const { page, dep } = env;
+  const responses = [];
+  page.on('response', (r) => { if (r.url() === dep.url) responses.push(r.headers()['x-frame-options']); });
+  await page.goto(dep.hubUrl);
+  await sleep(1200);
+  assert.equal(await findGameFrame(page, dep, 300), null, '막혔다면 게임 프레임이 없어야 함');
+  const inner = page.frames().find((f) => f !== page.mainFrame());
+  assert.ok(inner, '허브의 iframe 자리는 있다');
+  assert.match(inner.url(), /^chrome-error:/, '브라우저가 삽입을 차단한 페이지여야 함');
+  assert.equal(await page.evaluate(() => getComputedStyle(document.body).backgroundColor), 'rgb(0, 0, 0)', '허브 배경은 검정');
+  assert.ok(responses.includes('SAMEORIGIN'), `/exec 응답에 X-Frame-Options 가 있어야 함: ${JSON.stringify(responses)}`);
+  assert.equal(dep.output.xFrameOptionsMode, null);
+  // 같은 설정에서 주소를 직접 열면 멀쩡하다 (그래서 원인을 알아채기 어렵다)
+  const direct = await env.ctx.newPage();
+  await direct.goto(dep.url);
+  const gameFrame = await findGameFrame(direct, dep);
+  assert.ok(gameFrame, '직접 열면 게임이 떠야 함');
+  await direct.close();
 });
 
 scenario('diag', '진단 화면(?page=diag): iframe 안에서 그려지고, 점검 항목이 채워지고, 서버 호출이 OK 이며, 오류가 없다 (Index 는 읽지 않는다)', {
