@@ -41,7 +41,7 @@ const FAKE_API_RE = /^https:\/\/script\.google\.com\/macros\/s\/TEST\/exec(\?.*)
 const CLIENT_ID_RE = /^[A-Za-z0-9_-]{16,64}$/;
 const XSS_NICK = '<img src=x onerror=alert(1)>';
 const SANDBOX = 'allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads allow-top-navigation-by-user-activation';
-const VIEWPORT_META = 'width=device-width, initial-scale=1, viewport-fit=cover';
+const VIEWPORT_META = 'width=device-width, initial-scale=1';
 const ALLOWED_META = new Set(['viewport', 'apple-mobile-web-app-capable', 'google-site-verification', 'mobile-web-app-capable']); // HtmlOutput.addMetaTag 가 받는 이름
 const PUBLIC_FUNCTIONS = ['apiRanking', 'apiSubmit', 'doGet', 'doPost', 'setup'];
 const PENDING = { nickname: '보관', score: 77, maxLevel: 3, playTimeMs: 20000, drops: 12, clientId: 'abcdefghijklmnop1234' };
@@ -1181,6 +1181,37 @@ scenario('storage-blocked', 'localStorage 가 막힌 iframe(allow-same-origin �
   assert.equal(await text(fr, '#final-best'), String(score));
 });
 
+scenario('diag', '진단 화면(?page=diag): iframe 안에서 그려지고, 점검 항목이 채워지고, 서버 호출이 OK 이며, 오류가 없다 (Index 는 읽지 않는다)', {
+  noPage: true, rows: sampleSheet(3),
+}, async (env) => {
+  const { page, dep } = env;
+  await page.goto(dep.url + '?page=diag');
+  assert.equal(await page.title(), '수박 합치기 진단');
+  assert.equal(await page.locator('meta[name=viewport]').getAttribute('content'), VIEWPORT_META);
+  await page.waitForSelector('iframe#userHtmlFrame');
+  const fr = await (await page.locator('iframe#userHtmlFrame').elementHandle()).contentFrame();
+  assert.ok(fr, 'iframe 의 frame 을 얻지 못함');
+  await fr.waitForFunction(() => /서버 호출: OK/.test(document.getElementById('out')?.textContent ?? ''), null, { timeout: 8000 });
+  const out = await fr.evaluate(() => document.getElementById('out').textContent);
+  assert.match(out, /기기: .*\n/);
+  assert.match(out, /창 크기: \d+x\d+ \(화면 \d+x\d+, 배율 [\d.]+\)/);
+  assert.match(out, /iframe 안: 예/);
+  assert.match(out, /문법 optional chaining: OK/);
+  assert.match(out, /정규식 lookbehind: OK/);
+  assert.match(out, /큰 캔버스 그리기: OK 픽셀=2\d\d,\d+,\d+,255/);
+  assert.match(out, /서버 호출: OK \(\d+ms\)/);
+  // 저장소는 iframe 종류에 따라 갈린다. 그 한 줄을 빼면 오류 줄이 없어야 한다.
+  assert.match(out, env.sameOrigin ? /localStorage: OK/ : /localStorage: ERROR SecurityError/);
+  assert.deepEqual(out.split('\n').filter((l) => /ERROR|JS오류|이상한 응답|실패|없음$/.test(l) && !/^localStorage:/.test(l) && !/^visualViewport:/.test(l)), []);
+  // 눈으로 보는 시험 영역이 실제로 그려졌다
+  assert.ok(await isVisible(fr, '.bars'));
+  assert.ok(await isVisible(fr, '.box .blur'));
+  assert.ok(await isVisible(fr, '#dvh'));
+  assert.equal(await fr.evaluate(() => document.getElementById('big').width), 1122);
+  assert.deepEqual(dep.doGetCalls, [{ page: 'diag' }]);
+  assert.deepEqual(dep.mocks.html.requested, [], '진단 화면은 Index 를 읽지 않는다');
+});
+
 scenario('exec-routing', '웹 앱 주소 라우팅: 주소만 열면 화면, ?action=ranking 은 JSON, 알 수 없는 action 은 bad_request, POST 는 JSON, Index 가 없으면 친절한 안내', {
   noPage: true, rows: sampleSheet(5), modes: ['same'],
 }, async (env) => {
@@ -1194,9 +1225,18 @@ scenario('exec-routing', '웹 앱 주소 라우팅: 주소만 열면 화면, ?ac
     assert.equal(r.status, 200);
     assert.match(r.type, /^text\/html/, `${q || '(없음)'} 은 화면이어야 함`);
     assert.match(r.body, /<title>수박 합치기<\/title>/);
-    assert.match(r.body, /<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">/);
+    assert.match(r.body, /<meta name="viewport" content="width=device-width, initial-scale=1">/);
     assert.match(r.body, /<iframe[^>]+sandbox="allow-scripts /);
   }
+  // 진단 화면, 메타 태그 토글, action 우선
+  const diagPage = await get('?page=diag');
+  assert.match(diagPage.type, /^text\/html/);
+  assert.match(diagPage.body, /<title>수박 합치기 진단<\/title>/);
+  assert.doesNotMatch((await get('?meta=none')).body, /<meta name="viewport"/);
+  assert.doesNotMatch((await get('?page=diag&meta=none')).body, /<meta name="viewport"/);
+  const diagAction = await get('?page=diag&action=ranking&limit=1');
+  assert.match(diagAction.type, /^application\/json/);
+  assert.equal(JSON.parse(diagAction.body).data.length, 1);
   const ranking = await get('?action=ranking&limit=3');
   assert.match(ranking.type, /^application\/json/);
   const json = JSON.parse(ranking.body);

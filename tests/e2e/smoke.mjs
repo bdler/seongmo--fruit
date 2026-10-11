@@ -682,6 +682,38 @@ scenario('g', '오프라인(API_URL 없음): 제출 폼 숨김, 안내 문구, �
   assert.ok(!env.requests.some((r) => /google/.test(r.url)));
 });
 
+scenario('banner', '오류 표시: 평소엔 없고, 스크립트 오류/처리 안 된 거부가 나면 원인과 함께 빨간 상자로 뜨며 탭하면 닫히고, 3개까지만 쌓인다', {
+  ignore: [/배너 시험/, /unhandled/i],
+}, async (env) => {
+  const { page } = env;
+  await loadGame(env);
+  assert.equal(await page.locator('[data-error-banner]').count(), 0, '평소에는 오류 상자가 없어야 함');
+  // ResizeObserver 루프 경고는 무시한다
+  await page.evaluate(() => window.dispatchEvent(new ErrorEvent('error', { message: 'ResizeObserver loop limit exceeded' })));
+  assert.equal(await page.locator('[data-error-banner]').count(), 0);
+  // 실제 스크립트 오류 → 상자
+  await page.evaluate(() => { setTimeout(() => { throw new Error('배너 시험 오류 1'); }, 0); });
+  await page.waitForSelector('[data-error-banner]');
+  const text = await page.locator('[data-error-banner]').first().textContent();
+  assert.match(text, /^오류: .*배너 시험 오류 1/);
+  assert.match(text, /\(탭하면 닫힙니다\)/);
+  // 탭하면 닫힌다
+  await page.locator('[data-error-banner]').first().click();
+  assert.equal(await page.locator('[data-error-banner]').count(), 0);
+  // 처리 안 된 Promise 거부도 보인다
+  await page.evaluate(() => { Promise.reject(new Error('배너 시험 거부')); });
+  await page.waitForSelector('[data-error-banner]');
+  assert.match(await page.locator('[data-error-banner]').first().textContent(), /처리되지 않은 오류 배너 시험 거부/);
+  await page.locator('[data-error-banner]').first().click();
+  // 한 페이지에서 3개까지만 (오류가 쏟아져도 화면을 덮지 않는다). 위에서 이미 2개 썼으니 남은 1개만 더 뜬다.
+  await page.evaluate(() => { for (let i = 0; i < 5; i++) setTimeout(() => { throw new Error('배너 시험 폭주 ' + i); }, 0); });
+  await page.waitForSelector('[data-error-banner]');
+  await page.waitForTimeout(300);
+  assert.equal(await page.locator('[data-error-banner]').count(), 1);
+  // 게임은 오류 상자와 상관없이 계속 돌아간다
+  assert.ok(await page.locator('#btn-start').isEnabled());
+});
+
 scenario('g2', '오프라인 부팅(API_URL 없음): 보관된 점수는 보내지도 지우지도 않고 그대로 둔다', {
   storage: { [STORAGE_KEYS.pending]: JSON.stringify(OFFLINE_PENDING) },
 }, async (env) => {

@@ -3,6 +3,7 @@
  * (스프레드시트에 바인딩된 스크립트. 파일은 Code.gs, Index.html, appsscript.json 세 개)
  *
  *   GET  (action 없음)               -> 게임 화면 (Index.html). 웹 앱 주소를 그냥 열면 이것이 나온다.
+ *   GET  ?page=diag                  -> 진단 화면. 폰에서 게임 화면이 검게/비게 나올 때 원인을 보려고 연다. (?meta=none 은 viewport 메타 없이 연다)
  *   GET  ?action=ranking&limit=10    -> { ok: true, data: [{ nickname, score, maxLevel, at }] }   (외부 클라이언트용 JSON)
  *   POST text/plain JSON 본문         -> { ok: true } | { ok: false, error: '<코드>' }              (외부 클라이언트용 JSON)
  *   google.script.run.apiRanking(limit) / apiSubmit(payload)
@@ -54,7 +55,10 @@ const LOCK_WAIT_MS = 5000;
 const PAGE_FILE = 'Index';
 const PAGE_TITLE = '수박 합치기';
 // 화면은 Apps Script 가 감싸는 iframe 안에서 열리므로 viewport 는 HTML 안이 아니라 서버에서 넣어야 적용된다.
-const PAGE_VIEWPORT = 'width=device-width, initial-scale=1, viewport-fit=cover';
+// viewport-fit=cover 는 일부러 뺐다: 이 화면은 iframe 안이라 안전 영역(env(safe-area-inset-*))을 직접 쓰지 못하고,
+// 아이폰 사파리에서 바깥 페이지를 노치 아래까지 펼치는 이 옵션이 득이 되는 점이 없다.
+const PAGE_VIEWPORT = 'width=device-width, initial-scale=1';
+const PAGE_DIAG_TITLE = '수박 합치기 진단';
 const PAGE_MISSING_MESSAGE =
   '게임 화면 파일(Index.html)을 불러오지 못했습니다.\n' +
   'Apps Script 편집기 왼쪽 파일 목록에서 + → HTML 을 눌러 이름을 Index 로 만들고(.html 은 자동으로 붙습니다), ' +
@@ -80,8 +84,10 @@ const FORMULA_START_RE = /^[=+\-@\t\r]/;
 function doGet(e) {
   try {
     const p = (e && e.parameter) || {};
-    // action 이 없거나 빈 문자열이면 게임 화면. action 이 있으면 (화면이 아닌 외부 클라이언트를 위한) JSON API 이다.
-    if (p.action == null || p.action === '') return page_();
+    // action 이 없거나 빈 문자열이면 화면. action 이 있으면 (화면이 아닌 외부 클라이언트를 위한) JSON API 이다.
+    // 화면은 기본이 게임이고, ?page=diag 는 폰에서 화면이 안 나올 때 원인을 보는 진단 화면이다.
+    // ?meta=none 은 서버가 넣는 viewport 메타 태그를 빼고 연다 (그 태그가 원인인지 가려내는 용도).
+    if (p.action == null || p.action === '') return String(p.page) === 'diag' ? diagPage_(p) : page_(p);
     if (String(p.action) !== 'ranking') return json_(fail_('bad_request'));
     return json_(rankingResult_(p.limit));
   } catch (err) {
@@ -129,13 +135,105 @@ function apiSubmit(payload) {
 
 // Index 파일은 템플릿이 아니라 그대로 내보낸다 (createTemplateFromFile/스크립틀릿 <? ?> 을 쓰지 않는다).
 // 파일이 없거나 읽을 수 없으면 스택 트레이스 없이 무엇을 해야 하는지만 알려 준다.
-function page_() {
+function page_(params) {
   try {
-    return HtmlService.createHtmlOutputFromFile(PAGE_FILE).setTitle(PAGE_TITLE).addMetaTag('viewport', PAGE_VIEWPORT);
+    return withMeta_(HtmlService.createHtmlOutputFromFile(PAGE_FILE).setTitle(PAGE_TITLE), params);
   } catch (err) {
     console.error(String((err && err.stack) || err));
     return ContentService.createTextOutput(PAGE_MISSING_MESSAGE);
   }
+}
+
+// 서버가 넣는 viewport 메타 태그. ?meta=none 이면 넣지 않는다.
+function withMeta_(output, params) {
+  if (params && String(params.meta) === 'none') return output;
+  return output.addMetaTag('viewport', PAGE_VIEWPORT);
+}
+
+// 진단 화면: 아이폰 등에서 게임 화면이 검게/비게 나올 때 "구글 스크립트 화면 자체가 뜨는지"와
+// 의심 요소(큰 캔버스, 블러 효과, 저장소, 문법 지원, 서버 호출)가 각각 되는지를 한눈에 보여 준다.
+// 외부 주소를 전혀 쓰지 않고, 오래된 브라우저에서도 돌도록 일부러 옛 문법(ES5)만 쓴다.
+function diagPage_(params) {
+  try {
+    return withMeta_(HtmlService.createHtmlOutput(diagHtml_()).setTitle(PAGE_DIAG_TITLE), params);
+  } catch (err) {
+    console.error(String((err && err.stack) || err));
+    return ContentService.createTextOutput('진단 화면을 만들지 못했습니다.');
+  }
+}
+
+function diagHtml_() {
+  return [
+    '<!doctype html>',
+    '<html lang="ko"><head><meta charset="utf-8">',
+    '<style>',
+    'html,body{margin:0;background:#fffbe6;color:#111}',
+    'body{padding:14px;font:16px/1.5 -apple-system,system-ui,sans-serif}',
+    'h1{font-size:20px;margin:0 0 6px}',
+    '.bars{display:flex;height:26px;margin:8px 0}.bars i{flex:1}',
+    'pre{white-space:pre-wrap;word-break:break-all;font:13px/1.5 ui-monospace,Menlo,monospace;background:#fff;border:1px solid #e0c97a;border-radius:8px;padding:10px;margin:8px 0}',
+    '.t{margin:12px 0 4px;font-weight:bold;font-size:14px}',
+    '.box{position:relative;height:90px;border-radius:10px;overflow:hidden;background:linear-gradient(90deg,#e53935,#fdd835,#43a047,#1e88e5)}',
+    '.blur{position:absolute;left:30%;top:15%;width:40%;height:70%;background:rgba(255,255,255,.55);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);border-radius:12px}',
+    'canvas{display:block;width:100%;height:110px;border-radius:10px;background:#ddd}',
+    '#dvh{height:6dvh;background:#1e88e5;border-radius:6px}',
+    '</style></head><body>',
+    '<h1>수박 합치기 진단 화면</h1>',
+    '<p>이 글자가 보이면 구글 스크립트 화면 자체는 정상입니다. 이 화면 전체를 캡처해서 보내 주세요.</p>',
+    '<div class="bars"><i style="background:#e53935"></i><i style="background:#43a047"></i><i style="background:#1e88e5"></i><i style="background:#fdd835"></i></div>',
+    '<pre id="out">검사 중…</pre>',
+    '<div class="t">① 블러 효과: 무지개 위에 흐릿한 흰 상자가 보여야 합니다 (검은 상자면 문제)</div>',
+    '<div class="box"><div class="blur"></div></div>',
+    '<div class="t">② 큰 캔버스(1122×1683): 색 띠와 글자가 보여야 합니다 (검정이면 문제)</div>',
+    '<canvas id="big"></canvas>',
+    '<div class="t">③ dvh 단위: 파란 띠가 보여야 합니다 (안 보이면 문제)</div>',
+    '<div id="dvh"></div>',
+    '<script>',
+    '(function () {',
+    '  var out = document.getElementById("out");',
+    '  var lines = [];',
+    '  function put() { out.textContent = lines.join("\\n"); }',
+    '  function add(k, v) { lines.push(k + ": " + v); put(); }',
+    '  function tryit(k, fn) { try { add(k, fn()); } catch (e) { add(k, "ERROR " + (e && e.name) + " " + (e && e.message)); } }',
+    '  window.onerror = function (m, f, l) { add("JS오류", m + " @" + l); };',
+    '  add("시각", new Date().toISOString());',
+    '  add("기기", navigator.userAgent);',
+    '  tryit("창 크기", function () { return innerWidth + "x" + innerHeight + " (화면 " + screen.width + "x" + screen.height + ", 배율 " + devicePixelRatio + ")"; });',
+    '  tryit("visualViewport", function () { var v = window.visualViewport; return v ? Math.round(v.width) + "x" + Math.round(v.height) + " 배율 " + v.scale : "없음"; });',
+    '  tryit("iframe 안", function () { return window.top !== window ? "예" : "아니오(최상위)"; });',
+    '  tryit("다크 모드", function () { return window.matchMedia("(prefers-color-scheme: dark)").matches ? "예" : "아니오"; });',
+    '  tryit("CSS dvh", function () { return CSS.supports("height", "100dvh") ? "지원" : "미지원"; });',
+    '  tryit("CSS backdrop-filter", function () { return (CSS.supports("backdrop-filter", "blur(1px)") || CSS.supports("-webkit-backdrop-filter", "blur(1px)")) ? "지원" : "미지원"; });',
+    '  tryit("CSS aspect-ratio", function () { return CSS.supports("aspect-ratio", "1 / 1") ? "지원" : "미지원"; });',
+    '  tryit("CSS inset", function () { return CSS.supports("inset", "0") ? "지원" : "미지원"; });',
+    '  tryit("dvh 상자 높이", function () { return Math.round(document.getElementById("dvh").getBoundingClientRect().height) + "px"; });',
+    '  tryit("문법 optional chaining", function () { return new Function("var a={};return (a?.b ?? 1)")() === 1 ? "OK" : "이상"; });',
+    '  tryit("정규식 lookbehind", function () { new RegExp("(?<=a)b"); return "OK"; });',
+    '  tryit("localStorage", function () { localStorage.setItem("__d", "1"); localStorage.removeItem("__d"); return "OK"; });',
+    '  tryit("PointerEvent", function () { return typeof PointerEvent; });',
+    '  tryit("ResizeObserver", function () { return typeof ResizeObserver; });',
+    '  tryit("AudioContext", function () { return typeof (window.AudioContext || window.webkitAudioContext); });',
+    '  tryit("큰 캔버스 그리기", function () {',
+    '    var c = document.getElementById("big"); c.width = 1122; c.height = 1683;',
+    '    var g = c.getContext("2d"); var gr = g.createLinearGradient(0, 0, 1122, 0);',
+    '    gr.addColorStop(0, "#e53935"); gr.addColorStop(0.5, "#fdd835"); gr.addColorStop(1, "#1e88e5");',
+    '    g.fillStyle = gr; g.fillRect(0, 0, 1122, 1683);',
+    '    g.fillStyle = "#000"; g.font = "bold 160px sans-serif"; g.fillText("BIG CANVAS OK", 40, 300);',
+    '    var d = g.getImageData(5, 5, 1, 1).data;',
+    '    return "OK 픽셀=" + d[0] + "," + d[1] + "," + d[2] + "," + d[3];',
+    '  });',
+    '  var t0 = Date.now(); var done = false;',
+    '  if (window.google && google.script && google.script.run) {',
+    '    setTimeout(function () { if (!done) add("서버 호출", "10초가 지나도 응답 없음"); }, 10000);',
+    '    google.script.run',
+    '      .withSuccessHandler(function (r) { done = true; add("서버 호출", (r && r.ok === true ? "OK" : "이상한 응답 " + JSON.stringify(r)) + " (" + (Date.now() - t0) + "ms)"); })',
+    '      .withFailureHandler(function (e) { done = true; add("서버 호출", "실패 " + (e && e.message)); })',
+    '      .apiRanking(1);',
+    '  } else { add("서버 호출", "google.script.run 이 없음"); }',
+    '})();',
+    '</script>',
+    '</body></html>',
+  ].join('\n');
 }
 
 // ── 점수 제출 ────────────────────────────────────────

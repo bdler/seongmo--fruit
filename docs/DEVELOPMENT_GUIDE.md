@@ -411,7 +411,8 @@ function stepOnce(app) {
 - 레이아웃은 **세로 모바일 우선**. 게임 영역 비율 `2:3`을 유지하며 화면에 맞춰 축소.
 - **낮은 가로 화면**(가로로 눕힌 폰, 200~300% 확대한 데스크톱: `@media (orientation: landscape) and (max-height: 500px)`)에서는 게임판을 왼쪽에 높이만큼 크게 두고 HUD/진화 줄을 오른쪽에 세운다. 이 모드에서 시작/결과/랭킹 패널은 게임판 안이 아니라 **화면 전체 기준**으로 펼쳐진다. 패널이 스크롤돼도 '게임 시작'/'다시 하기'/'닫기' 버튼은 아래에 고정되어 보인다.
 - 닉네임 입력 줄은 뷰포트 폭이 아니라 **패널의 실제 폭**으로 줄바꿈한다(입력칸 최소 `9em`).
-- `<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">`. **Apps Script 에서는 HTML 파일에 직접 쓴 meta 가 무시되고**(공식 문서) 화면이 바깥 페이지 안의 iframe 에 들어가므로, 서버가 같은 값을 `addMetaTag('viewport', …)` 로 넣는다(`Code.gs` 의 `PAGE_VIEWPORT`. `tests/gas.test.mjs` 가 `index.html` 의 값과 같은지 확인한다). 페이지 제목도 서버의 `setTitle('수박 합치기')` 가 정한다.
+- `<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">` (개발용/GitHub Pages 에서 쓴다). **Apps Script 에서는 HTML 파일에 직접 쓴 meta 가 무시되고**(공식 문서) 화면이 바깥 페이지 안의 iframe 에 들어가므로, 서버가 `addMetaTag('viewport', …)` 로 따로 넣는다(`Code.gs` 의 `PAGE_VIEWPORT`). 서버 값은 `viewport-fit=cover` 만 뺀 `width=device-width, initial-scale=1` 이다: iframe 안에서는 안전 영역을 직접 쓸 수 없고, 아이폰 사파리에서 화면이 검게 나오는 증상의 의심 요소를 줄이려는 조치다(원인으로 확인된 것은 아님. `tests/gas.test.mjs` 가 두 값의 관계를 고정한다). 페이지 제목도 서버의 `setTitle('수박 합치기')` 가 정한다.
+- **진단 화면**: `?page=diag` 는 게임 대신 `Code.gs` 안의 작은 진단 HTML(`diagHtml_()`)을 내보낸다. 폰에서 화면이 안 나올 때 구글 스크립트 화면 자체가 뜨는지, 큰 캔버스·블러·`dvh`·저장소·문법 지원·서버 호출이 각각 되는지를 한 화면에 보여 준다. `?meta=none` 은 서버의 viewport 메타 없이 연다. 게임 화면에는 `index.html` 머리의 인라인 스크립트가 스크립트 오류/처리 안 된 거부를 빨간 상자로 보여 준다(번들이 문법 오류로 못 돌 때도 잡히도록 번들과 별도 스크립트다).
 - iOS Safari는 사용자 제스처 전까지 오디오가 막힌다 → **첫 터치에서 AudioContext를 resume**.
 - 더블탭 확대, 길게 눌러 선택/컨텍스트 메뉴가 뜨지 않게 `user-select: none`, `touch-action` 등을 적용.
 - 색 대비는 WCAG AA(일반 글자 4.5:1)를 기준으로 한다. 기본 버튼은 흰 글자 대비 4.9~5.6:1, 보조 글자색은 카드/HUD 위에서 4.5:1 이상이다(`tests/static.test.mjs` 가 CSS 에서 읽어 검증한다).

@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import vm from 'node:vm';
 
 import { scoreOf, WATERMELON_PAIR_BONUS, LAST_LEVEL, MAX_DROP_LEVEL, TIMING } from '../js/config.js';
 import { HEADER, SHEET_ID, loadGas, publicFunctions, createScriptRun } from './helpers/gas-env.mjs';
@@ -200,7 +201,7 @@ test('화면: action 이 없거나 비어 있으면 Index 를 제목/viewport �
     assert.equal(out.getTitle(), '수박 합치기', name);
     assert.deepEqual(
       out.getMetaTags().map((t) => [t.name, t.content]),
-      [['viewport', 'width=device-width, initial-scale=1, viewport-fit=cover']],
+      [['viewport', 'width=device-width, initial-scale=1']],
       name
     );
     assert.deepEqual(env.html.requested, ['Index'], '확장자 없이 Index 로 요청한다');
@@ -210,12 +211,68 @@ test('화면: action 이 없거나 비어 있으면 Index 를 제목/viewport �
   }
 });
 
-test('화면: 서버의 viewport 는 개발용 index.html 의 viewport 와 같다 (래퍼 iframe 때문에 서버에서 넣는다)', () => {
+test('화면: 서버의 viewport 는 개발용 index.html 의 viewport 에서 viewport-fit=cover 만 뺀 것이다 (래퍼 iframe 때문에 서버에서 넣는다)', () => {
   const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
   const devViewport = /<meta name="viewport" content="([^"]*)"/.exec(html)?.[1];
   assert.ok(devViewport, 'index.html 에 viewport 메타가 있어야 함');
-  assert.equal(createEnv().gas.consts.PAGE_VIEWPORT, devViewport);
-  assert.equal(createEnv().gas.consts.PAGE_FILE, 'Index');
+  const { PAGE_VIEWPORT, PAGE_FILE } = createEnv().gas.consts;
+  assert.equal(PAGE_VIEWPORT, devViewport.replace(/,\s*viewport-fit=cover/, ''));
+  assert.ok(!/viewport-fit/.test(PAGE_VIEWPORT), 'iframe 안 화면에서는 viewport-fit=cover 를 쓰지 않는다');
+  assert.equal(PAGE_FILE, 'Index');
+});
+
+test('진단 화면: ?page=diag 는 Index 를 읽지 않고 진단 HTML 을 제목/viewport 와 함께 내보낸다', () => {
+  const env = createEnv({ rows: [HEADER, row(1000, 'a', 10)] });
+  const out = env.gas.doGet({ parameter: { page: 'diag' } });
+  assert.equal(out.getTitle(), '수박 합치기 진단');
+  assert.deepEqual(out.getMetaTags().map((t) => [t.name, t.content]), [['viewport', 'width=device-width, initial-scale=1']]);
+  assert.equal(out.getContent(), env.gas.diagHtml_());
+  assert.deepEqual(env.html.requested, [], 'Index 파일을 읽지 않는다');
+  assert.equal(env.sheet.reads, 0);
+  assert.deepEqual([env.lockWaits, env.cachePuts, env.openedIds], [[], [], []]);
+});
+
+test('진단 화면: page 값이 diag 가 아니면 게임 화면, action 이 있으면 action 이 우선이다', () => {
+  for (const page of ['', 'game', 'DIAG', 'diag ', 'x']) {
+    const env = createEnv();
+    assert.equal(env.gas.doGet({ parameter: { page } }).getContent(), INDEX_HTML, JSON.stringify(page));
+  }
+  const env = createEnv({ rows: [HEADER, row(1000, 'a', 10)] });
+  const json = JSON.parse(env.gas.doGet({ parameter: { page: 'diag', action: 'ranking' } }).getContent());
+  assert.equal(json.ok, true);
+  assert.deepEqual(JSON.parse(env.gas.doGet({ parameter: { page: 'diag', action: 'bogus' } }).getContent()), { ok: false, error: 'bad_request' });
+});
+
+test('진단 화면: ?meta=none 이면 게임/진단 둘 다 viewport 메타 없이 열린다', () => {
+  for (const page of [undefined, 'diag']) {
+    const out = createEnv().gas.doGet({ parameter: { meta: 'none', ...(page ? { page } : {}) } });
+    assert.deepEqual(out.getMetaTags(), [], `page=${page}`);
+    assert.ok(out.getTitle());
+  }
+  // none 이 아닌 값은 평소와 같다
+  assert.equal(createEnv().gas.doGet({ parameter: { meta: 'yes' } }).getMetaTags().length, 1);
+});
+
+test('진단 화면: 외부 주소 없이 스스로 완결되고, 스크립트는 옛 문법(ES5)으로 구문 분석되며, 서버 호출은 apiRanking 이다', () => {
+  const html = createEnv().gas.diagHtml_();
+  assert.ok(html.startsWith('<!doctype html>'));
+  assert.ok(!/https?:\/\//.test(html), '외부 주소가 없어야 함');
+  assert.ok(!/<script[^>]*\bsrc=|<link\b/i.test(html), '외부 파일을 불러오지 않는다');
+  const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
+  assert.equal(scripts.length, 1);
+  assert.doesNotThrow(() => new vm.Script(scripts[0], { filename: 'diag.js' }));
+  assert.ok(!/=>|\blet\b|\bconst\b|\?\.|\?\?/.test(scripts[0].replace(/new Function\("[^"]*"\)/, '')), '진단 스크립트 본문은 ES5 만 쓴다');
+  assert.match(scripts[0], /\.apiRanking\(1\)/);
+  assert.match(html, /<title>|<h1>수박 합치기 진단 화면<\/h1>/);
+  assert.ok(html.length < 12000, `진단 화면이 너무 큼: ${html.length}`);
+});
+
+test('진단 화면: 만들기에 실패하면 던지지 않고 짧은 안내 문구를 낸다', () => {
+  const env = createEnv();
+  env.html.failCreate = true;
+  let out;
+  assert.doesNotThrow(() => { out = env.gas.doGet({ parameter: { page: 'diag' } }); });
+  assert.match(out.getContent(), /진단 화면을 만들지 못했습니다/);
 });
 
 test('화면: Index 는 템플릿으로 평가하지 않고 내용 그대로 내보낸다 (스크립틀릿/</script> 가 있어도)', () => {
@@ -223,7 +280,10 @@ test('화면: Index 는 템플릿으로 평가하지 않고 내용 그대로 내
   const env = createEnv({ files: { Index: tricky } });
   assert.equal(env.gas.doGet({ parameter: {} }).getContent(), tricky);
   // 소스 수준 점검: 템플릿/평가 API 를 쓰지 않는다 (주석은 제외)
-  assert.doesNotMatch(CODE_ONLY, /createTemplate|\.evaluate\(|HtmlService\.createHtmlOutput\(|\.append\(/);
+  assert.doesNotMatch(CODE_ONLY, /createTemplate|\.evaluate\(|\.append\(/);
+  // 문자열로 화면을 만드는 createHtmlOutput 은 진단 화면(diagPage_) 한 곳에서만 쓴다. 게임 화면(page_)은 파일을 그대로 내보낸다.
+  assert.equal(CODE_ONLY.split('HtmlService.createHtmlOutput(').length - 1, 1);
+  assert.match(CODE_ONLY, /function diagPage_\([^)]*\) \{[\s\S]*?HtmlService\.createHtmlOutput\(diagHtml_\(\)\)[\s\S]*?\n\}/);
   assert.match(CODE_ONLY, /HtmlService\.createHtmlOutputFromFile\(PAGE_FILE\)/);
 });
 

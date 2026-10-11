@@ -50,7 +50,7 @@ const skeletonOf = (source) => source.replace(/(<(script|style)\b[^>]*>)[\s\S]*?
 const urlAttrsOf = (source) => [...source.matchAll(/\b(src|href)\s*=\s*(?:(["'])(.*?)\2|([^\s>]+))/gi)].map((m) => `${m[1]}=${m[3] ?? m[4]}`);
 const scripts = blocks(html, 'script');
 const styles = blocks(html, 'style');
-const [matterBlock, appBlock] = scripts;
+const [bannerBlock, matterBlock, appBlock] = scripts; // 오류 표시(head), Matter, 앱
 
 // 가짜 조각으로 assembleHtml 을 돌리기 위한 기본값 (실제 index.html 을 쓰되 나머지는 최소한)
 const baseParts = () => ({
@@ -132,8 +132,8 @@ test('<style> 은 정확히 1개이고 내용은 css/style.css 그대로, 외부
   assert.ok(!/<link\b[^>]*rel=["']?stylesheet/i.test(html));
 });
 
-test('인라인 <script> 는 정확히 2개(Matter, 앱): 둘 다 src/type 없는 클래식 스크립트', () => {
-  assert.equal(scripts.length, 2);
+test('인라인 <script> 는 정확히 3개(오류 표시, Matter, 앱): 모두 src/type 없는 클래식 스크립트', () => {
+  assert.equal(scripts.length, 3);
   for (const s of scripts) assert.equal(s.attrs, '', `속성이 없어야 함: <script ${s.attrs}>`);
   assert.ok(!/type\s*=\s*["']?module/i.test(html), 'type=module 이 없어야 함');
   assert.ok(!/<script[^>]*\bsrc\s*=/i.test(html), 'src= 스크립트가 없어야 함');
@@ -143,6 +143,16 @@ test('각 인라인 스크립트는 클래식 스크립트로 구문 분석된�
   for (const [i, s] of scripts.entries()) {
     assert.doesNotThrow(() => new vm.Script(s.body, { filename: `inline-script-${i}.js` }), `script #${i}`);
   }
+});
+
+test('오류 표시 스크립트: head 안에서 가장 먼저 실행되고, 번들 문법 오류도 잡도록 별도 스크립트이며, 외부 주소가 없다', () => {
+  assert.ok(html.indexOf('<head>') < bannerBlock.index && bannerBlock.index < html.indexOf('</head>'), 'head 안에 있어야 함');
+  assert.ok(bannerBlock.index < matterBlock.index && bannerBlock.index < appBlock.index, '번들보다 먼저 실행돼야 함');
+  assert.match(bannerBlock.body, /addEventListener\('error'/);
+  assert.match(bannerBlock.body, /addEventListener\('unhandledrejection'/);
+  assert.ok(!/https?:\/\//.test(bannerBlock.body), '외부 주소가 없어야 함');
+  assert.ok(!/=>|\blet\b|\bconst\b|\?\./.test(bannerBlock.body), '오래된 브라우저에서도 돌도록 옛 문법(ES5)만 쓴다');
+  assert.equal(bannerBlock.body, readText('index.html').match(/<script>([\s\S]*?)<\/script>/)[1], '개발용 index.html 의 것과 같아야 함');
 });
 
 test('Matter 가 앱보다 먼저, 둘 다 </body> 앞 body 끝쪽에 있다', () => {

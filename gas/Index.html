@@ -81,7 +81,6 @@ body {
   background:
     radial-gradient(120% 60% at 50% 0%, #fffaf0 0%, rgba(255, 250, 240, 0) 70%),
     linear-gradient(#fff4d6, #ffe9b8);
-  background-attachment: fixed;
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
   -webkit-user-select: none;
@@ -293,9 +292,9 @@ noscript {
   align-items: center;
   justify-content: center;
   padding: 12px;
-  background: rgba(255, 244, 214, 0.72);
-  -webkit-backdrop-filter: blur(6px);
-  backdrop-filter: blur(6px);
+  /* 흐림(backdrop-filter)은 쓰지 않는다. 아이폰 사파리의 iframe 안에서 화면이 검게 나온 사례가 있어 의심 요소를
+     줄이려고 뺐다 (원인으로 확인된 것은 아님). 꾸밈 효과보다 화면이 확실히 나오는 쪽을 택하고, 대신 배경을 더 불투명하게 한다. */
+  background: rgba(255, 244, 214, 0.86);
 }
 
 /* 게임오버 패널에는 10행짜리 랭킹이 있어 내부 스크롤이 필요하다 */
@@ -686,6 +685,37 @@ form .row .btn { flex: 1 0 auto; }
   }
 }
 </style>
+  <!-- 오류 표시: 폰에는 개발자 도구가 없어서, 스크립트 오류가 나면 원인을 화면 위에 빨간 상자로 보여 준다.
+       번들보다 먼저 실행되는 별도 스크립트라 번들이 문법 오류로 아예 못 돌 때도 잡힌다. 오류가 없으면 아무 일도 하지 않는다. -->
+  <script>
+    (function () {
+      var shown = 0;
+      function show(msg) {
+        if (shown >= 3) return;
+        shown++;
+        try {
+          var box = document.createElement('div');
+          box.setAttribute('role', 'alert');
+          box.setAttribute('data-error-banner', '');
+          box.style.cssText = 'position:fixed;left:8px;right:8px;top:8px;z-index:99999;padding:10px 12px;border-radius:10px;' +
+            'background:#b71c1c;color:#fff;font:13px/1.45 -apple-system,system-ui,sans-serif;word-break:break-all;white-space:pre-wrap';
+          box.textContent = '오류: ' + msg + '\n(탭하면 닫힙니다)';
+          box.onclick = function () { if (box.parentNode) box.parentNode.removeChild(box); };
+          (document.body || document.documentElement).appendChild(box);
+        } catch (e) { /* 표시조차 못 하면 어쩔 수 없다 */ }
+      }
+      window.addEventListener('error', function (ev) {
+        var m = (ev && ev.message) || '알 수 없는 오류';
+        if (/ResizeObserver loop/i.test(m)) return;
+        var where = ev && ev.filename ? ' @' + String(ev.filename).split('/').pop() + ':' + (ev.lineno || 0) : '';
+        show(m + where);
+      });
+      window.addEventListener('unhandledrejection', function (ev) {
+        var r = ev && ev.reason;
+        show('처리되지 않은 오류 ' + ((r && r.message) || r));
+      });
+    })();
+  </script>
 </head>
 <body>
   <div id="app">

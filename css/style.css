@@ -61,7 +61,6 @@ body {
   background:
     radial-gradient(120% 60% at 50% 0%, #fffaf0 0%, rgba(255, 250, 240, 0) 70%),
     linear-gradient(#fff4d6, #ffe9b8);
-  background-attachment: fixed;
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
   -webkit-user-select: none;
@@ -273,9 +272,9 @@ noscript {
   align-items: center;
   justify-content: center;
   padding: 12px;
-  background: rgba(255, 244, 214, 0.72);
-  -webkit-backdrop-filter: blur(6px);
-  backdrop-filter: blur(6px);
+  /* 흐림(backdrop-filter)은 쓰지 않는다. 아이폰 사파리의 iframe 안에서 화면이 검게 나온 사례가 있어 의심 요소를
+     줄이려고 뺐다 (원인으로 확인된 것은 아님). 꾸밈 효과보다 화면이 확실히 나오는 쪽을 택하고, 대신 배경을 더 불투명하게 한다. */
+  background: rgba(255, 244, 214, 0.86);
 }
 
 /* 게임오버 패널에는 10행짜리 랭킹이 있어 내부 스크롤이 필요하다 */

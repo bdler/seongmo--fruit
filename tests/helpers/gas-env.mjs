@@ -34,7 +34,7 @@
 // 어디까지 흉내 내는가 (그 밖은 일부러 없다 → Code.gs 가 쓰면 TypeError 로 드러난다)
 //   SpreadsheetApp(openById/getActiveSpreadsheet/flush), PropertiesService, LockService, CacheService(만료 포함), ContentService(createTextOutput 만),
 //   HtmlService(createHtmlOutputFromFile 만: 템플릿/스크립틀릿을 평가하지 않고 파일 내용을 그대로 돌려준다.
-//   createTemplateFromFile/createHtmlOutput 은 없다), console.
+//   createHtmlOutput(문자열) 은 있고 createTemplateFromFile 은 없다), console.
 //   HtmlService 모의: 없는 파일은 Error('Unknown file: 이름') 을 던진다 (정확한 문구는 Apps Script 의 것과 다를 수 있다).
 //   Date 는 mocks.now 를 따르는 가짜 Date 로 바뀐다.
 //
@@ -54,10 +54,10 @@ export const SHEET_ID = 'sheet-id-0001';
 export const HEADER = ['timestamp', 'nickname', 'score', 'maxLevel', 'playTimeMs', 'drops', 'clientId'];
 export const CODE_GS_URL = new URL('../../gas/Code.gs', import.meta.url);
 
-const FN_NAMES = ['doGet', 'doPost', 'setup', 'apiRanking', 'apiSubmit', 'page_', 'submitScore_', 'sanitizeNickname_', 'isPlausible_', 'getRanking_'];
+const FN_NAMES = ['doGet', 'doPost', 'setup', 'apiRanking', 'apiSubmit', 'page_', 'submitScore_', 'sanitizeNickname_', 'isPlausible_', 'getRanking_', 'diagHtml_', 'diagPage_'];
 const CONST_NAMES = [
   'MAX_SCORE', 'MAX_SCORE_PER_DROP', 'MIN_MS_PER_DROP', 'RANKING_KEEP', 'RANKING_CACHE_SEC', 'THROTTLE_SEC', 'MAX_NICKNAME',
-  'MAX_BODY_CHARS', 'PAGE_FILE', 'PAGE_TITLE', 'PAGE_VIEWPORT', 'PAGE_MISSING_MESSAGE',
+  'MAX_BODY_CHARS', 'PAGE_FILE', 'PAGE_TITLE', 'PAGE_VIEWPORT', 'PAGE_DIAG_TITLE', 'PAGE_MISSING_MESSAGE',
 ];
 
 // ── 시트 ────────────────────────────────────────────────
@@ -167,6 +167,15 @@ function createHtmlService(html) {
       html.outputs.push(out);
       return out;
     },
+    // 문자열로 바로 화면을 만든다 (진단 화면). html.failCreate 를 켜면 Apps Script 가 실패한 것처럼 던진다.
+    createHtmlOutput(content) {
+      html.created.push(content);
+      if (html.failCreate) throw new Error('createHtmlOutput 실패 (모의)');
+      if (typeof content !== 'string') throw new Error('createHtmlOutput: 문자열이 필요합니다');
+      const out = new HtmlOutputMock(null, content);
+      html.outputs.push(out);
+      return out;
+    },
   };
 }
 
@@ -199,6 +208,8 @@ export function loadGas({ files = {}, rows, hasSheet = true, sheetId = SHEET_ID,
     html: {
       files: new Map(Object.entries(files).map(([name, content]) => [name.replace(/\.html$/i, ''), String(content)])),
       requested: [],
+      created: [],
+      failCreate: false,
       outputs: [],
     },
   };
